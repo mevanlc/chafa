@@ -20,6 +20,7 @@
 #include "config.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <glib.h>
 #include "chafa.h"
@@ -976,6 +977,25 @@ chafa_symbol_renderer_draw_all_pixels (ChafaSymbolRenderer *renderer,
 
 	if (canvas->config.alpha_threshold == 0)
 	    canvas->have_alpha = FALSE;
+
+	/* chafa-syms-rs parity oracle: dump the post-prep pixel grid (raw RGBA
+	 * ChafaPixel bytes) so the Rust selection core can be fed chafa's exact
+	 * pixels, isolating Phase 4 (selection) from the pixel pipeline. Header
+	 * line "W H\n" then W*H*4 raw bytes. No effect unless CHAFA_DUMP_PIXELS set. */
+	{
+	    const gchar *pp = g_getenv ("CHAFA_DUMP_PIXELS");
+	    if (pp)
+	    {
+		FILE *pf = fopen (pp, "wb");
+		if (pf)
+		{
+		    fprintf (pf, "%d %d\n", canvas->width_pixels, canvas->height_pixels);
+		    fwrite (canvas->pixels, sizeof (ChafaPixel),
+			    (size_t) canvas->width_pixels * canvas->height_pixels, pf);
+		    fclose (pf);
+		}
+	    }
+	}
 
 	update_cells (canvas);
 	canvas->needs_clear = FALSE;

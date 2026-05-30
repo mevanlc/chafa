@@ -20,6 +20,7 @@
 #include "config.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <glib.h>
 #include "chafa.h"
@@ -846,6 +847,74 @@ chafa_canvas_build_ansi (ChafaCanvas *canvas)
     return chafa_canvas_print (canvas, NULL);
 }
 
+/* chafa-syms-rs parity oracle: dump per-cell (codepoint, fg_color, bg_color)
+ * to the file named by the CHAFA_DUMP_CELLS env var. Exposes the symbol
+ * renderer's internal cell state directly, bypassing all printer encoding
+ * (SGR 7 inversion, space optimization, etc.), so the Rust port can validate
+ * its selection core against chafa's actual picks. No effect unless the env
+ * var is set and the canvas is in symbol mode. */
+static void
+chafa_syms_rs_dump_cells (ChafaCanvas *canvas)
+{
+    const gchar *dump_path = g_getenv ("CHAFA_DUMP_CELLS");
+    FILE *df;
+    gint cx, cy, w, h;
+
+    if (!dump_path || canvas->config.pixel_mode != CHAFA_PIXEL_MODE_SYMBOLS || !canvas->cells)
+        return;
+
+    df = fopen (dump_path, "w");
+    if (!df)
+        return;
+
+    w = canvas->config.width;
+    h = canvas->config.height;
+    fprintf (df, "%d %d\n", w, h);
+    for (cy = 0; cy < h; cy++)
+    {
+        for (cx = 0; cx < w; cx++)
+        {
+            ChafaCanvasCell *cell = &canvas->cells [(gsize) cy * (gsize) w + cx];
+            fprintf (df, "%d %d %u %08x %08x\n",
+                     cx, cy, (unsigned) cell->c,
+                     (unsigned) cell->fg_color, (unsigned) cell->bg_color);
+        }
+    }
+    fclose (df);
+}
+
+/* chafa-syms-rs parity oracle: dump the compiled symbol map (narrow + wide
+ * codepoints in prepared order) to the file named by CHAFA_DUMP_SYMMAP. Used
+ * to validate the Rust port's selector/compile/sort against chafa. Run with
+ * CHAFA_SYMS_RS_TIEBREAK set for a deterministic, comparable order. */
+static void
+chafa_syms_rs_dump_symmap (ChafaCanvas *canvas)
+{
+    const gchar *path = g_getenv ("CHAFA_DUMP_SYMMAP");
+    const ChafaSymbolMap *sm;
+    FILE *df;
+    gint i;
+
+    if (!path || canvas->config.pixel_mode != CHAFA_PIXEL_MODE_SYMBOLS)
+        return;
+
+    sm = &canvas->config.symbol_map;
+    df = fopen (path, "w");
+    if (!df)
+        return;
+
+    fprintf (df, "SYMMAP_NARROW %d\n", sm->n_symbols);
+    for (i = 0; i < sm->n_symbols; i++)
+        fprintf (df, "%u %d\n", (unsigned) sm->symbols [i].c, sm->symbols [i].popcount);
+
+    fprintf (df, "SYMMAP_WIDE %d\n", sm->n_symbols2);
+    for (i = 0; i < sm->n_symbols2; i++)
+        fprintf (df, "%u %d %d\n", (unsigned) sm->symbols2 [i].sym [0].c,
+                 sm->symbols2 [i].sym [0].popcount, sm->symbols2 [i].sym [1].popcount);
+
+    fclose (df);
+}
+
 /**
  * chafa_canvas_print:
  * @canvas: The canvas to generate a printable representation of
@@ -870,6 +939,8 @@ chafa_canvas_print (ChafaCanvas *canvas, ChafaTermInfo *term_info)
 
     g_return_val_if_fail (canvas != NULL, NULL);
     g_return_val_if_fail (canvas->refs > 0, NULL);
+
+    chafa_syms_rs_dump_cells (canvas);
 
     if (term_info)
         chafa_term_info_ref (term_info);
@@ -956,6 +1027,9 @@ chafa_canvas_print_rows (ChafaCanvas *canvas, ChafaTermInfo *term_info,
     g_return_if_fail (canvas->refs > 0);
     g_return_if_fail (array_out != NULL);
 
+    chafa_syms_rs_dump_cells (canvas);
+    chafa_syms_rs_dump_symmap (canvas);
+
     if (term_info)
         chafa_term_info_ref (term_info);
     else
@@ -975,6 +1049,28 @@ chafa_canvas_print_rows (ChafaCanvas *canvas, ChafaTermInfo *term_info,
         (*array_out) [1] = NULL;
         if (array_len_out)
             *array_len_out = 1;
+    }
+
+    /* chafa-syms-rs parity oracle: dump the canonical canvas ANSI (rows joined
+     * by '\n', last row without one — exactly chafa_canvas_print's output, with
+     * no CLI framing) to CHAFA_DUMP_ANSI, for the byte-exact printer gate. */
+    {
+        const gchar *ap = g_getenv ("CHAFA_DUMP_ANSI");
+        if (ap && *array_out)
+        {
+            FILE *af = fopen (ap, "wb");
+            if (af)
+            {
+                gint k;
+                for (k = 0; (*array_out) [k] != NULL; k++)
+                {
+                    if (k > 0)
+                        fputc ('\n', af);
+                    fwrite ((*array_out) [k]->str, 1, (*array_out) [k]->len, af);
+                }
+                fclose (af);
+            }
+        }
     }
 
     chafa_term_info_unref (term_info);

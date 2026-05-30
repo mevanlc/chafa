@@ -353,6 +353,20 @@ glyph_to_bitmap_wide (gint width, gint height,
                                             CHAFA_SYMBOL_WIDTH_PIXELS * 2);
 }
 
+/* chafa-syms-rs parity: stock chafa breaks equal-popcount ties with an
+ * unstable qsort over GHashTable iteration order, which is platform-dependent
+ * and non-canonical. When CHAFA_SYMS_RS_TIEBREAK is set, break ties by
+ * codepoint (a total order, since codepoints are unique per compiled map) so
+ * the order is fully deterministic and matches the Rust port. */
+static gboolean
+chafa_syms_rs_tiebreak (void)
+{
+    static gint cached = -1;
+    if (cached < 0)
+        cached = g_getenv ("CHAFA_SYMS_RS_TIEBREAK") ? 1 : 0;
+    return cached;
+}
+
 static gint
 compare_symbols_popcount (const void *a, const void *b)
 {
@@ -363,6 +377,13 @@ compare_symbols_popcount (const void *a, const void *b)
         return -1;
     if (a_sym->popcount > b_sym->popcount)
         return 1;
+    if (chafa_syms_rs_tiebreak ())
+    {
+        if (a_sym->c < b_sym->c)
+            return -1;
+        if (a_sym->c > b_sym->c)
+            return 1;
+    }
     return 0;
 }
 
@@ -378,6 +399,13 @@ compare_symbols2_popcount (const void *a, const void *b)
     if (a_sym->sym [0].popcount + a_sym->sym [1].popcount
         > b_sym->sym [0].popcount + b_sym->sym [1].popcount)
         return 1;
+    if (chafa_syms_rs_tiebreak ())
+    {
+        if (a_sym->sym [0].c < b_sym->sym [0].c)
+            return -1;
+        if (a_sym->sym [0].c > b_sym->sym [0].c)
+            return 1;
+    }
     return 0;
 }
 
