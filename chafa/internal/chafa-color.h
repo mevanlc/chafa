@@ -123,6 +123,9 @@ typedef struct
 }
 ChafaPixel;
 
+/* Assert pixels take up exactly 4 bytes */
+typedef char chafa_pixel_is_4_bytes [sizeof (ChafaPixel) == sizeof (guint32) ? 1 : -1];
+
 /* Color selection candidate pair */
 
 typedef struct
@@ -133,6 +136,15 @@ typedef struct
 ChafaColorCandidates;
 
 /* Internal API */
+
+static inline guint32
+chafa_color_to_u32 (ChafaColor color)
+{
+    guint32 u32;
+
+    memcpy (&u32, &color, sizeof (u32));
+    return u32;
+}
 
 guint32 chafa_pack_color (const ChafaColor *color) G_GNUC_PURE;
 void chafa_unpack_color (guint32 packed, ChafaColor *color_out);
@@ -150,6 +162,24 @@ G_STMT_START { \
 void chafa_color_accum_div_scalar (ChafaColorAccum *color, gint scalar);
 
 void chafa_color_rgb_to_din99d (const ChafaColor *rgb, ChafaColor *din99);
+
+/* Map an 8-bit channel value to the nearest of n_levels evenly spaced levels,
+ * and a level back to its 8-bit representation. These round-trip exactly for
+ * any n_levels in [2, 256]. With 256 levels they return the identity. */
+
+static inline gint
+chafa_color_channel_to_level (gint ch_value, gint n_levels)
+{
+    return (ch_value * (n_levels - 1) + 127) / 255;
+}
+
+static inline gint
+chafa_color_level_to_channel (gint level, gint n_levels)
+{
+    return (level * 255 + (n_levels - 1) / 2) / (n_levels - 1);
+}
+
+gint chafa_color_brightness (const ChafaColor *col, ChafaColorSpace cs);
 
 G_END_DECLS
 

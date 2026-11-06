@@ -1,3 +1,5 @@
+AUTOMAKE_OPTIONS = subdir-objects
+
 SUBDIRS = data
 
 AM_CFLAGS = $(LIBCHAFA_CFLAGS) $(GLIB_CFLAGS)
@@ -16,6 +18,11 @@ LOG_DRIVER = $(top_srcdir)/tests/test-driver.sh
 check_PROGRAMS = \
 	byte-fifo-test \
 	canvas-test \
+	color-hash-test \
+	color-test \
+	loader-arithmetic-test \
+	palette-test \
+	stream-reader-test \
 	term-info-test
 
 byte_fifo_test_SOURCES = \
@@ -23,6 +30,22 @@ byte_fifo_test_SOURCES = \
 
 canvas_test_SOURCES = \
 	canvas-test.c
+
+color_hash_test_SOURCES = \
+	color-hash-test.c
+
+color_test_SOURCES = \
+	color-test.c
+
+loader_arithmetic_test_SOURCES = \
+	loader-arithmetic-test.c \
+	$(top_srcdir)/tools/chafa/chicle-util.c
+
+palette_test_SOURCES = \
+	palette-test.c
+
+stream_reader_test_SOURCES = \
+	stream-reader-test.c
 
 term_info_test_SOURCES = \
 	term-info-test.c
@@ -47,6 +70,11 @@ endif
 TESTS = \
 	byte-fifo-test \
 	canvas-test \
+	color-hash-test \
+	color-test \
+	loader-arithmetic-test \
+	palette-test \
+	stream-reader-test \
 	term-info-test \
 	$(TOOL_CHECKS)
 
@@ -61,10 +89,12 @@ AM_TESTS_ENVIRONMENT = \
 
 AM_CPPFLAGS = \
 	-I$(top_srcdir)/chafa \
-	-I$(top_builddir)/chafa
+	-I$(top_builddir)/chafa \
+	-I$(top_srcdir)/tools/chafa
 
 EXTRA_DIST = \
 	$(TOOL_CHECKS) \
+	loader-arithmetic-test.c \
 	chafa-tool-gallery.sh \
 	chafa-tool-test-common.sh \
 	test-driver.sh

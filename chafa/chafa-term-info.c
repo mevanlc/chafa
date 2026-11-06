@@ -374,6 +374,8 @@ parse_seq_args (gchar *out, SeqArgInfo *arg_info, const gchar *in,
             else
             {
                 /* Bad "%?" escape */
+                g_set_error (error, CHAFA_TERM_INFO_ERROR, CHAFA_TERM_INFO_ERROR_BAD_ARGUMENTS,
+                             "Control sequence had a malformed argument specifier.");
                 goto out;
             }
         }
@@ -682,6 +684,7 @@ try_parse_seq (const ChafaTermInfo *term_info, ChafaTermSeq seq,
     seq_args = &term_info->seq_args [seq] [0];
 
     memset (args_out, 0, seq_meta [seq].n_args * sizeof (guint));
+    *n_args_out = 0;
 
     for ( ; ; i++)
     {
@@ -1473,6 +1476,8 @@ chafa_term_info_parse_seq (ChafaTermInfo *term_info, ChafaTermSeq seq,
     g_return_val_if_fail (*input != NULL, CHAFA_PARSE_FAILURE);
     g_return_val_if_fail (input_len != NULL, CHAFA_PARSE_FAILURE);
 
+    if (!*input_len)
+        return CHAFA_PARSE_AGAIN;
     if (!chafa_term_info_have_seq (term_info, seq))
         return CHAFA_PARSE_FAILURE;
 
@@ -1661,6 +1666,9 @@ chafa_term_info_chain (ChafaTermInfo *outer, ChafaTermInfo *inner)
     const gchar *outer_name, *inner_name;
     gchar *new_name;
     gint i;
+
+    g_return_val_if_fail (outer != NULL, NULL);
+    g_return_val_if_fail (inner != NULL, NULL);
 
     chained = chafa_term_info_copy (outer);
 

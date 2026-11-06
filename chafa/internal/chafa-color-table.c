@@ -27,6 +27,7 @@
 
 #include "internal/chafa-color-table.h"
 #include "internal/chafa-pca.h"
+#include "internal/chafa-private.h"
 
 #define CHAFA_COLOR_TABLE_ENABLE_PROFILING 0
 #define DEBUG_PEN_CHOICE(x)
@@ -115,7 +116,7 @@ color_diff (guint32 a, guint32 b)
 }
 
 static void
-project_color (const ChafaColorTable *color_table, guint32 color, gint *v_out)
+project_color_2axis (const ChafaColorTable *color_table, guint32 color, gint *v_out)
 {
     ChafaVec3i32 v;
 
@@ -186,40 +187,65 @@ do_pca (ChafaColorTable *color_table)
     for (i = 0; i < color_table->n_entries; i++)
     {
         ChafaColorTableEntry *entry = &color_table->entries [i];
-        project_color (color_table, color_table->pens [entry->pen], entry->v);
+        project_color_2axis (color_table, color_table->pens [entry->pen], entry->v);
     }
+}
+
+/* Bucket map over the first projection */
+static void
+gen_bucket_map (ChafaColorTable *color_table)
+{
+    gint n = color_table->n_entries;
+    gint k, e = 0;
+
+    color_table->bucket_v0_min = color_table->entries [0].v [0];
+    color_table->bucket_v0_range = MAX (color_table->entries [n - 1].v [0] - color_table->bucket_v0_min, 1);
+    color_table->bucket_v0_mul = (CHAFA_COLOR_TABLE_N_BUCKETS << 16) / color_table->bucket_v0_range;
+
+    for (k = 0; k < CHAFA_COLOR_TABLE_N_BUCKETS; k++)
+    {
+        gint threshold = color_table->bucket_v0_min
+            + (gint) (((gint64) k * color_table->bucket_v0_range) / CHAFA_COLOR_TABLE_N_BUCKETS);
+
+        while (e < n && color_table->entries [e].v [0] < threshold)
+            e++;
+        color_table->bucket_start [k] = e;
+    }
+
+    color_table->bucket_start [CHAFA_COLOR_TABLE_N_BUCKETS] = n;
 }
 
 static inline gboolean
 refine_pen_choice (const ChafaColorTable *color_table, guint want_color, const gint *v, gint j,
-                   gint *best_pen, gint64 *best_diff)
+                   gint *best_pen, gint *best_diff)
 {
     const ChafaColorTableEntry *pj = &color_table->entries [j];
-    gint64 a, b, d;
+    gint a, b, d;
 
-    a = POW2 ((gint64) pj->v [0] - v [0]);
+    a = POW2 (pj->v [0] - v [0]);
 
     profile_counter_inc (n_a);
     DEBUG_PEN_CHOICE (g_printerr ("a=%d\n", a));
 
     if (a <= *best_diff)
     {
-        /* TODO: When using gint32, the POW2 multiplication can result in overflow.
-         * Our workaround is to use gint64 for best_diff, a, b and d. This probably
-         * slows us down, though (we should measure). Is there a better fix? */
-        b = POW2 ((gint64) pj->v [1] - v [1]);
+        b = POW2 (pj->v [1] - v [1]);
 
         profile_counter_inc (n_b);
         DEBUG_PEN_CHOICE (g_printerr ("b=%d\n", b));
 
-        if (b <= *best_diff)
+        /* The axes can be slightly non-orthogonal due to rounding, so we
+         * inflate best_diff slightly for the comparison. Cast to guint since
+         * it starts out at G_MAXINT and would overflow otherwise. */
+        if ((guint) a + (guint) b <= (guint) *best_diff + ((guint) *best_diff >> 4))
         {
             d = color_diff (color_table->pens [pj->pen], want_color);
 
             profile_counter_inc (n_c);
             DEBUG_PEN_CHOICE (g_printerr ("d=%d\n", d));
 
-            if (d <= *best_diff)
+            /* Ties always go to the lowest-index entry */
+            if (d < *best_diff || (d == *best_diff && j < *best_pen))
             {
                 *best_pen = j;
                 *best_diff = d;
@@ -237,6 +263,140 @@ refine_pen_choice (const ChafaColorTable *color_table, guint want_color, const g
 
     return TRUE;
 }
+
+/* Approximate index of the entries whose first projection is near v0,
+ * from the bucket map. Always returns a valid entry index. */
+static gint
+bucket_start_for_projection (const ChafaColorTable *color_table, gint v0)
+{
+    gint k = (gint) (((gint64) (v0 - color_table->bucket_v0_min) * color_table->bucket_v0_mul) >> 16);
+
+    k = CLAMP (k, 0, CHAFA_COLOR_TABLE_N_BUCKETS - 1);
+    return MIN ((color_table->bucket_start [k] + color_table->bucket_start [k + 1]) / 2,
+                color_table->n_entries - 1);
+}
+
+static gint
+find_nearest_pen_generic (const ChafaColorTable *color_table, guint32 want_color)
+{
+    gint best_diff = G_MAXINT;
+    gint best_pen = 0;
+    gint v [2];
+    gint j, m;
+
+    project_color_2axis (color_table, want_color, v);
+    m = bucket_start_for_projection (color_table, v [0]);
+
+    /* Left scan for closer match */
+
+    for (j = m; j >= 0; j--)
+    {
+        if (!refine_pen_choice (color_table, want_color, v, j, &best_pen, &best_diff))
+            break;
+    }
+
+    /* Right scan for closer match */
+
+    for (j = m + 1; j < color_table->n_entries; j++)
+    {
+        if (!refine_pen_choice (color_table, want_color, v, j, &best_pen, &best_diff))
+            break;
+    }
+
+    return color_table->entries [best_pen].pen;
+}
+
+#ifdef HAVE_AVX2_INTRINSICS
+
+#define AVX2_LANDING_ENTRIES 32
+#define AVX2_SCAN_ENTRIES 8
+
+static gint
+project_color_1axis (const ChafaColorTable *color_table, guint32 color)
+{
+    ChafaVec3i32 v;
+
+    v.v [0] = (color & 0xff) * FIXED_MUL;
+    v.v [1] = ((color >> 8) & 0xff) * FIXED_MUL;
+    v.v [2] = ((color >> 16) & 0xff) * FIXED_MUL;
+
+    chafa_vec3i32_sub (&v, &v, &color_table->average);
+
+    return scalar_project_vec3i32 (&v, &color_table->eigenvectors [0], color_table->eigen_mul [0]);
+}
+
+static gint
+find_nearest_pen_avx2 (const ChafaColorTable *color_table, guint32 want_color)
+{
+    const gint n = color_table->n_entries;
+    gint v0;
+    gint start, end, best_i, best_diff, bound;
+
+    if (n <= AVX2_LANDING_ENTRIES)
+    {
+        best_i = chafa_find_nearest_u32_avx2 (color_table->entry_colors, n, want_color);
+        return color_table->entries [best_i].pen;
+    }
+
+    /* Center the window on the color's neighborhood */
+
+    v0 = project_color_1axis (color_table, want_color);
+
+    start = bucket_start_for_projection (color_table, v0) - AVX2_LANDING_ENTRIES / 2;
+    start = CLAMP (start, 0, n - AVX2_LANDING_ENTRIES);
+    end = start + AVX2_LANDING_ENTRIES;
+
+    best_i = start + chafa_find_nearest_u32_dist_avx2 (color_table->entry_colors + start,
+                                                       AVX2_LANDING_ENTRIES, want_color, &best_diff);
+    bound = best_diff * (FIXED_MUL * FIXED_MUL);
+    bound += bound >> 4;
+
+    /* Left scan for closer match */
+
+    while (start > 0
+           && POW2 (color_table->entries [start - 1].v [0] - v0) <= bound)
+    {
+        gint s = MAX (start - AVX2_SCAN_ENTRIES, 0);
+        gint d;
+        gint i = s + chafa_find_nearest_u32_dist_avx2 (color_table->entry_colors + s,
+                                                       AVX2_SCAN_ENTRIES, want_color, &d);
+
+        if (d < best_diff || (d == best_diff && i < best_i))
+        {
+            best_i = i;
+            best_diff = d;
+            bound = best_diff * (FIXED_MUL * FIXED_MUL);
+            bound += bound >> 4;
+        }
+
+        start = s;
+    }
+
+    /* Right scan for closer match */
+
+    while (end < n
+           && POW2 (color_table->entries [end].v [0] - v0) <= bound)
+    {
+        gint s = MIN (end, n - AVX2_SCAN_ENTRIES);
+        gint d;
+        gint i = s + chafa_find_nearest_u32_dist_avx2 (color_table->entry_colors + s,
+                                                       AVX2_SCAN_ENTRIES, want_color, &d);
+
+        if (d < best_diff)
+        {
+            best_i = i;
+            best_diff = d;
+            bound = best_diff * (FIXED_MUL * FIXED_MUL);
+            bound += bound >> 4;
+        }
+
+        end = s + AVX2_SCAN_ENTRIES;
+    }
+
+    return color_table->entries [best_i].pen;
+}
+
+#endif
 
 void
 chafa_color_table_init (ChafaColorTable *color_table)
@@ -307,67 +467,40 @@ chafa_color_table_sort (ChafaColorTable *color_table)
     color_table->n_entries = j;
 
     do_pca (color_table);
-
     qsort (color_table->entries, color_table->n_entries, sizeof (ChafaColorTableEntry), compare_entries);
+
+    for (i = 0; i < color_table->n_entries; i++)
+        color_table->entry_colors [i] = color_table->pens [color_table->entries [i].pen];
+
+    gen_bucket_map (color_table);
     color_table->is_sorted = TRUE;
 }
 
 gint
 chafa_color_table_find_nearest_pen (const ChafaColorTable *color_table, guint32 want_color)
 {
-    gint64 best_diff = G_MAXINT64;
-    gint best_pen = 0;
-    gint v [2];
-    gint i, j, m;
-
     g_assert (color_table->n_entries > 0);
     g_assert (color_table->is_sorted);
 
     profile_counter_inc (n_lookups);
 
-    project_color (color_table, want_color, v);
-
-    /* Binary search for first vector component */
-
-    i = 0;
-    j = color_table->n_entries;
-
-    while (i != j)
+#ifdef HAVE_AVX2_INTRINSICS
+    if (chafa_have_avx2 ())
     {
-        gint n = i + (j - i) / 2;
-
-        if (v [0] > color_table->entries [n].v [0])
-            i = n + 1;
-        else
-            j = n;
+        return find_nearest_pen_avx2 (color_table, want_color & 0x00ffffff);
     }
+#endif
 
-    m = j;
-
-    /* Left scan for closer match */
-
-    for (j = m; j >= 0; j--)
-    {
-        if (!refine_pen_choice (color_table, want_color, v, j, &best_pen, &best_diff))
-            break;
-    }
-
-    /* Right scan for closer match */
-
-    for (j = m + 1; j < color_table->n_entries; j++)
-    {
-        if (!refine_pen_choice (color_table, want_color, v, j, &best_pen, &best_diff))
-            break;
-    }
+    return find_nearest_pen_generic (color_table, want_color);
 
 #if CHAFA_COLOR_TABLE_ENABLE_PROFILING
     gint best_pen_2 = -1;
-    gint64 best_diff_2 = G_MAXINT64;
+    gint best_diff_2 = G_MAXINT;
 
     for (i = 0; i < color_table->n_entries; i++)
     {
         const ChafaColorTableEntry *pi = &color_table->entries [i];
-        gint64 d = color_diff (color_table->pens [pi->pen], want_color);
+        gint d = color_diff (color_table->pens [pi->pen], want_color);
 
         if (d < best_diff_2)
         {
@@ -385,6 +518,4 @@ chafa_color_table_find_nearest_pen (const ChafaColorTable *color_table, guint32 
         g_printerr ("\n");
     }
 #endif
-
-    return color_table->entries [best_pen].pen;
 }

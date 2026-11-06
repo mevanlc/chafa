@@ -353,20 +353,6 @@ glyph_to_bitmap_wide (gint width, gint height,
                                             CHAFA_SYMBOL_WIDTH_PIXELS * 2);
 }
 
-/* chafa-syms-rs parity: stock chafa breaks equal-popcount ties with an
- * unstable qsort over GHashTable iteration order, which is platform-dependent
- * and non-canonical. When CHAFA_SYMS_RS_TIEBREAK is set, break ties by
- * codepoint (a total order, since codepoints are unique per compiled map) so
- * the order is fully deterministic and matches the Rust port. */
-static gboolean
-chafa_syms_rs_tiebreak (void)
-{
-    static gint cached = -1;
-    if (cached < 0)
-        cached = g_getenv ("CHAFA_SYMS_RS_TIEBREAK") ? 1 : 0;
-    return cached;
-}
-
 static gint
 compare_symbols_popcount (const void *a, const void *b)
 {
@@ -377,13 +363,10 @@ compare_symbols_popcount (const void *a, const void *b)
         return -1;
     if (a_sym->popcount > b_sym->popcount)
         return 1;
-    if (chafa_syms_rs_tiebreak ())
-    {
-        if (a_sym->c < b_sym->c)
-            return -1;
-        if (a_sym->c > b_sym->c)
-            return 1;
-    }
+    if (a_sym->c < b_sym->c)
+        return -1;
+    if (a_sym->c > b_sym->c)
+        return 1;
     return 0;
 }
 
@@ -399,13 +382,14 @@ compare_symbols2_popcount (const void *a, const void *b)
     if (a_sym->sym [0].popcount + a_sym->sym [1].popcount
         > b_sym->sym [0].popcount + b_sym->sym [1].popcount)
         return 1;
-    if (chafa_syms_rs_tiebreak ())
-    {
-        if (a_sym->sym [0].c < b_sym->sym [0].c)
-            return -1;
-        if (a_sym->sym [0].c > b_sym->sym [0].c)
-            return 1;
-    }
+    if (a_sym->sym [0].c < b_sym->sym [0].c)
+        return -1;
+    if (a_sym->sym [0].c > b_sym->sym [0].c)
+        return 1;
+    if (a_sym->sym [1].c < b_sym->sym [1].c)
+        return -1;
+    if (a_sym->sym [1].c > b_sym->sym [1].c)
+        return 1;
     return 0;
 }
 
@@ -997,7 +981,7 @@ parse_selectors (ChafaSymbolMap *symbol_map, const gchar *selectors, GError **er
 
             p0++;
 
-            for ( ; p0 && *p0; p0 = g_utf8_next_char (p0))
+            for ( ; p0 && *p0; p0 = g_utf8_find_next_char (p0, NULL))
             {
                 gunichar c = g_utf8_get_char (p0);
 
@@ -1586,6 +1570,8 @@ chafa_symbol_map_copy (const ChafaSymbolMap *symbol_map)
 {
     ChafaSymbolMap *new_symbol_map;
 
+    g_return_val_if_fail (symbol_map != NULL, NULL);
+
     new_symbol_map = g_new (ChafaSymbolMap, 1);
     chafa_symbol_map_copy_contents (new_symbol_map, symbol_map);
     return new_symbol_map;
@@ -1723,10 +1709,11 @@ chafa_symbol_map_remove_by_range (ChafaSymbolMap *symbol_map, gunichar first, gu
  * it's understood to be relative to the current set in @symbol_map,
  * otherwise the map is cleared first.
  *
- * The symbol tags are string versions of #ChafaSymbolTags, i.e.
+ * The symbol tags are string versions of #ChafaSymbolTags:
  * [all, none, space, solid, stipple, block, border, diagonal, dot,
- * quad, half, hhalf, vhalf, braille, technical, geometric, ascii,
- * extra].
+ * quad, half, hhalf, vhalf, inverted, braille, technical, geometric, ascii,
+ * alpha, digit, alnum, narrow, wide, ambiguous, ugly, legacy, sextant, wedge,
+ * latin, imported, octant, extra, bad].
  *
  * Examples: "block,border" sets map to contain symbols matching either
  * of those tags. "+block,border-dot,stipple" adds block and border
@@ -1741,6 +1728,7 @@ chafa_symbol_map_apply_selectors (ChafaSymbolMap *symbol_map, const gchar *selec
 {
     g_return_val_if_fail (symbol_map != NULL, FALSE);
     g_return_val_if_fail (symbol_map->refs > 0, FALSE);
+    g_return_val_if_fail (selectors != NULL, FALSE);
 
     return parse_selectors (symbol_map, selectors, error);
 }

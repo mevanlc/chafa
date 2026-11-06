@@ -428,11 +428,7 @@ draw_all_pixels (ChafaCanvas *canvas, ChafaPixelType src_pixel_type,
     {
         /* Symbol mode */
 
-        canvas->pixel_renderer = chafa_symbol_renderer_new (canvas,
-                                                            0,
-                                                            0,
-                                                            canvas->config.width,
-                                                            canvas->config.height);
+        canvas->pixel_renderer = chafa_symbol_renderer_new (canvas);
         if (canvas->pixel_renderer)
             chafa_symbol_renderer_draw_all_pixels (canvas->pixel_renderer,
                                                    src_pixel_type,
@@ -440,8 +436,7 @@ draw_all_pixels (ChafaCanvas *canvas, ChafaPixelType src_pixel_type,
                                                    src_width, src_height,
                                                    src_rowstride,
                                                    halign, valign,
-                                                   tuck,
-                                                   canvas->config.work_factor);
+                                                   tuck);
     }
     else if (canvas->config.pixel_mode == CHAFA_PIXEL_MODE_SIXELS)
     {
@@ -754,10 +749,14 @@ chafa_canvas_set_placement (ChafaCanvas *canvas, ChafaPlacement *placement)
     g_return_if_fail (canvas != NULL);
     g_return_if_fail (canvas->refs > 0);
 
-    chafa_placement_ref (placement);
+    if (placement)
+        chafa_placement_ref (placement);
     if (canvas->placement)
         chafa_placement_unref (canvas->placement);
     canvas->placement = placement;
+
+    if (!placement)
+        return;
 
     image = placement->image;
     g_assert (image != NULL);
@@ -885,8 +884,8 @@ chafa_syms_rs_dump_cells (ChafaCanvas *canvas)
 
 /* chafa-syms-rs parity oracle: dump the compiled symbol map (narrow + wide
  * codepoints in prepared order) to the file named by CHAFA_DUMP_SYMMAP. Used
- * to validate the Rust port's selector/compile/sort against chafa. Run with
- * CHAFA_SYMS_RS_TIEBREAK set for a deterministic, comparable order. */
+ * to validate the Rust port's selector/compile/sort against chafa. Equal-popcount
+ * ties are always broken by codepoint for a deterministic, comparable order. */
 static void
 chafa_syms_rs_dump_symmap (ChafaCanvas *canvas)
 {

@@ -23,6 +23,7 @@
 #include <string.h>  /* memcpy, memset */
 #include <math.h>  /* pow, cbrt, log, sqrt, atan2, cos, sin */
 #include "chafa.h"
+#include "internal/chafa-batch.h"
 #include "internal/chafa-private.h"
 
 #define DEBUG(x)
@@ -103,7 +104,7 @@ init_candidates (ChafaColorCandidates *candidates)
     candidates->error [0] = candidates->error [1] = G_MAXINT;
 }
 
-static gboolean
+static inline gboolean
 update_candidates (ChafaColorCandidates *candidates, gint index, gint error)
 {
     if (error < candidates->error [0])
@@ -221,7 +222,7 @@ chafa_init_palette (void)
     fixed_palette_256 [CHAFA_PALETTE_INDEX_TRANSPARENT].col [0].ch [3] = 0x00;
     fixed_palette_256 [CHAFA_PALETTE_INDEX_TRANSPARENT].col [1].ch [3] = 0x00;
 
-    for (i = 0; i < 0x5f / 2; i++)
+    for (i = 0; i < (0x5f + 0x01) / 2; i++)
         color_cube_216_channel_index [i] = 0;
     for ( ; i < (0x5f + 0x87) / 2; i++)
         color_cube_216_channel_index [i] = 1;
@@ -237,7 +238,7 @@ chafa_init_palette (void)
     palette_initialized = TRUE;
 }
 
-static gint
+static inline gint
 update_candidates_with_color_index_diff (ChafaColorCandidates *candidates, ChafaColorSpace color_space, const ChafaColor *color, gint index)
 {
     const ChafaColor *palette_color;
@@ -280,7 +281,7 @@ pick_color_fixed_24_grays (const ChafaColor *color, ChafaColorSpace color_space,
     error = chafa_color_diff_fast (color, palette_color);
     if (error < last_error)
     {
-        update_candidates (candidates, i, error);
+        update_candidates (candidates, i + 1, error);
         last_error = error;
         step = 1;
         i++;
@@ -411,9 +412,22 @@ typedef guint16 PnnBinIndex;
 
 typedef struct
 {
-    ChafaVec3f32 accum;
+    /* We accumulate our samples as integers, then convert them in place
+     * in the averaging pass. This makes the sampling loop more performant
+     * and improves accuracy on big images. */
+    union
+    {
+        ChafaVec3f32 f;
+        guint32 u [3];
+    }
+    accum;
+    union
+    {
+        gfloat f;
+        guint32 u;
+    }
+    count;
     gfloat err;
-    gfloat count;
     PnnBinIndex nearest, next, prev, tm, mtm;
 }
 PnnBin;
@@ -422,11 +436,11 @@ PnnBin;
 static gint
 color_to_index (const ChafaColor *color, gint bits_per_ch)
 {
-    guint8 mask = 0xff << (8 - bits_per_ch);
+    gint shift = 8 - bits_per_ch;
 
-    return ((color->ch [0] & mask) << (bits_per_ch * 2 - (8 - bits_per_ch)))
-        | ((color->ch [1] & mask) << (bits_per_ch - (8 - bits_per_ch)))
-        | ((color->ch [2] & mask) >> (8 - bits_per_ch));
+    return ((color->ch [0] >> shift) << (bits_per_ch * 2))
+        | ((color->ch [1] >> shift) << bits_per_ch)
+        | (color->ch [2] >> shift);
 }
 
 static gfloat
@@ -448,35 +462,37 @@ static void
 find_nearest (PnnBin *bins, PnnBinIndex index, const ChafaVec3f32 *rgb_weights)
 {
     PnnBin *bin1 = &bins [index];
+    const ChafaVec3f32 accum1 = bin1->accum.f;
+    const ChafaVec3f32 weights = *rgb_weights;
     gfloat err = G_MAXFLOAT;
     PnnBinIndex nearest = 0;
-    PnnBinIndex i, j;
+    PnnBinIndex i, j, next;
 
-    for (i = bin1->next; i; i = bins [i].next)
+    for (i = bin1->next; i; i = next)
     {
-        gfloat bin2_count = bins [i].count;
-        gfloat nerr2 = (bin1->count * bin2_count) / (bin1->count + bin2_count);
-        gfloat nerr = .0f;
+        gfloat bin2_count = bins [i].count.f;
+        gfloat nerr2 = (bin1->count.f * bin2_count) / (bin1->count.f + bin2_count);
+        gfloat nerr;
         ChafaVec3f32 tv;
+
+        next = bins [i].next;  /* Load early to prevent a stall */
 
         if (nerr2 >= err)
             continue;
 
-        chafa_vec3f32_sub (&tv, &bins [i].accum, &bin1->accum);
+        chafa_vec3f32_sub (&tv, &bins [i].accum.f, &accum1);
         chafa_vec3f32_hadamard (&tv, &tv, &tv);
-        chafa_vec3f32_hadamard (&tv, &tv, rgb_weights);
-        chafa_vec3f32_mul_scalar (&tv, &tv, nerr2 * (1 - RATIO));
-        nerr += chafa_vec3f32_sum_to_scalar (&tv);
+        chafa_vec3f32_hadamard (&tv, &tv, &weights);
+        nerr = nerr2 * (1 - RATIO) * chafa_vec3f32_sum_to_scalar (&tv);
         if (nerr >= err)
             continue;
 
         for (j = 0; j < 3; j++)
         {
-            chafa_vec3f32_sub (&tv, &bins [i].accum, &bin1->accum);
+            chafa_vec3f32_sub (&tv, &bins [i].accum.f, &accum1);
             chafa_vec3f32_hadamard (&tv, &tv, &pnn_coeffs [j]);
             chafa_vec3f32_hadamard (&tv, &tv, &tv);
-            chafa_vec3f32_mul_scalar (&tv, &tv, nerr2 * RATIO);
-            nerr += chafa_vec3f32_sum_to_scalar (&tv);
+            nerr += nerr2 * RATIO * chafa_vec3f32_sum_to_scalar (&tv);
             if (nerr >= err)
                 break;
         }
@@ -492,29 +508,56 @@ find_nearest (PnnBin *bins, PnnBinIndex index, const ChafaVec3f32 *rgb_weights)
     bin1->nearest = nearest;
 }
 
-static void
-vec3f32_add_color (ChafaVec3f32 *out, const ChafaColor *col)
+/* The initial nearest-neighbor pass; each bin's result depends only on the
+ * other bins' read-only fields, so batches of bins can run in parallel */
+typedef struct
 {
-    out->v [0] += col->ch [0];
-    out->v [1] += col->ch [1];
-    out->v [2] += col->ch [2];
-    /* Ignore alpha */
+    PnnBin *bins;
+    const ChafaVec3f32 *rgb_weights;
+}
+FindNearestCtx;
+
+static void
+find_nearest_worker (ChafaBatchInfo *batch, const FindNearestCtx *ctx)
+{
+    gint i;
+
+    for (i = batch->first_row; i < batch->first_row + batch->n_rows; i++)
+        find_nearest (ctx->bins, i, ctx->rgb_weights);
 }
 
 static void
-color_from_vec3f32_trunc (ChafaColor *col, const ChafaVec3f32 *v)
+find_initial_nearest (PnnBin *bins, gint n_bins, ChafaVec3f32 *rgb_weights)
 {
-    col->ch [0] = v->v [0];
-    col->ch [1] = v->v [1];
-    col->ch [2] = v->v [2];
+    FindNearestCtx ctx = { bins, rgb_weights };
+
+    /* The pass is quadratic in the number of bins. Don't bother with
+     * threading if n_bins is small. */
+    chafa_process_batches (&ctx,
+                           (GFunc) find_nearest_worker,
+                           NULL,
+                           n_bins,
+                           n_bins >= 512 ? chafa_get_n_actual_threads () : 1,
+                           1);
+}
+
+static void
+color_from_vec3f32_round (ChafaColor *col, const ChafaVec3f32 *v)
+{
+    col->ch [0] = (gint) (v->v [0] + 0.5f);
+    col->ch [1] = (gint) (v->v [1] + 0.5f);
+    col->ch [2] = (gint) (v->v [2] + 0.5f);
     /* Ignore alpha */
 }
 
-static gint
-sample_to_bins (PnnBin *bins, gconstpointer pixels, size_t n_pixels, size_t step,
-                gint bits_per_ch, gint alpha_threshold)
+/* Upper limit on the samples counted per bin; (2^24 * 255) fits in u32 */
+#define PNN_BIN_MAX_SAMPLES (1 << 24)
+
+/* saturate and bits_per_ch should be turned into constants on inlining */
+static inline gint
+sample_to_bins_impl (PnnBin *bins, const ChafaColor *p, size_t n_pixels, size_t step,
+                     gint bits_per_ch, gint alpha_threshold, gboolean saturate)
 {
-    const ChafaColor *p = (const ChafaColor *) pixels;
     gint n_samples = 0;
     size_t i;
 
@@ -527,12 +570,46 @@ sample_to_bins (PnnBin *bins, gconstpointer pixels, size_t n_pixels, size_t step
             continue;
 
         tb = &bins [color_to_index (&col, bits_per_ch)];
-        vec3f32_add_color (&tb->accum, &col);
-        tb->count += 1.0f;
+
+        if (saturate && tb->count.u >= PNN_BIN_MAX_SAMPLES)
+            continue;
+
+        tb->accum.u [0] += col.ch [0];
+        tb->accum.u [1] += col.ch [1];
+        tb->accum.u [2] += col.ch [2];
+        tb->count.u++;
         n_samples++;
     }
 
     return n_samples;
+}
+
+/* Inlining ramp. Make sure it's not inlined itself to keep the registers available. */
+static gint sample_to_bins (PnnBin *bins, gconstpointer pixels, size_t n_pixels, size_t step,
+                            gint bits_per_ch, gint alpha_threshold) G_GNUC_NO_INLINE;
+
+static gint
+sample_to_bins (PnnBin *bins, gconstpointer pixels, size_t n_pixels, size_t step,
+                gint bits_per_ch, gint alpha_threshold)
+{
+    const ChafaColor *p = (const ChafaColor *) pixels;
+
+    if (n_pixels / step >= PNN_BIN_MAX_SAMPLES)
+        return sample_to_bins_impl (bins, p, n_pixels, step, bits_per_ch, alpha_threshold, TRUE);
+
+    switch (bits_per_ch)
+    {
+        case 3:
+            return sample_to_bins_impl (bins, p, n_pixels, step, 3, alpha_threshold, FALSE);
+        case 4:
+            return sample_to_bins_impl (bins, p, n_pixels, step, 4, alpha_threshold, FALSE);
+        case 5:
+            return sample_to_bins_impl (bins, p, n_pixels, step, 5, alpha_threshold, FALSE);
+        default:
+            g_assert_not_reached ();
+    }
+
+    return 0;
 }
 
 static gint
@@ -569,16 +646,25 @@ pnn_palette (ChafaPalette *pal, gconstpointer pixels,
             goto out;
     }
 
-    /* --- Count active bins and average their colors --- */
+    /* --- Count active bins, convert to float and average them --- */
 
     for (i = 0, n_bins = 0; i < max_bins; i++)
     {
         PnnBin *tb = &bins [i];
+        guint32 n = tb->count.u;
+        guint32 s0 = tb->accum.u [0];
+        guint32 s1 = tb->accum.u [1];
+        guint32 s2 = tb->accum.u [2];
 
-        if (bins [i].count <= .0f)
+        if (n == 0)
             continue;
 
-        chafa_vec3f32_mul_scalar (&tb->accum, &tb->accum, 1.0f / tb->count);
+        tb->count.f = (gfloat) n;
+        tb->accum.f.v [0] = (gfloat) s0;
+        tb->accum.f.v [1] = (gfloat) s1;
+        tb->accum.f.v [2] = (gfloat) s2;
+
+        chafa_vec3f32_mul_scalar (&tb->accum.f, &tb->accum.f, 1.0f / tb->count.f);
         bins [n_bins++] = *tb;
     }
 
@@ -603,9 +689,13 @@ pnn_palette (ChafaPalette *pal, gconstpointer pixels,
     {
         bins [j].next = j + 1;
         bins [j + 1].prev = j;
-        bins [j].count = quanfn (bins [j].count, quan_rt);
+        bins [j].count.f = quanfn (bins [j].count.f, quan_rt);
     }
-    bins [j].count = quanfn (bins [j].count, quan_rt);
+    bins [j].count.f = quanfn (bins [j].count.f, quan_rt);
+
+    /* --- Find each bin's initial nearest neighbor --- */
+
+    find_initial_nearest (bins, n_bins, &rgb_weights);
 
     /* --- Set up heap --- */
 
@@ -614,10 +704,7 @@ pnn_palette (ChafaPalette *pal, gconstpointer pixels,
     for (i = 0; i < n_bins; i++)
     {
         PnnBinIndex h, l, l2;
-        gfloat err;
-
-        find_nearest (bins, i, &rgb_weights);
-        err = bins [i].err;
+        gfloat err = bins [i].err;
 
         heap [0]++;
         for (l = heap [0]; l > 1; l = l2)
@@ -684,17 +771,17 @@ pnn_palette (ChafaPalette *pal, gconstpointer pixels,
 
         tb = &bins [b1];
         nb = &bins [tb->nearest];
-        n1 = tb->count;
-        n2 = nb->count;
+        n1 = tb->count.f;
+        n2 = nb->count.f;
         d = 1.0f / (n1 + n2);
 
-        chafa_vec3f32_mul_scalar (&tb->accum, &tb->accum, n1);
-        chafa_vec3f32_mul_scalar (&tv1, &nb->accum, n2);
-        chafa_vec3f32_add (&tb->accum, &tb->accum, &tv1);
-        chafa_vec3f32_round (&tb->accum, &tb->accum);
-        chafa_vec3f32_mul_scalar (&tb->accum, &tb->accum, d);
+        chafa_vec3f32_mul_scalar (&tb->accum.f, &tb->accum.f, n1);
+        chafa_vec3f32_mul_scalar (&tv1, &nb->accum.f, n2);
+        chafa_vec3f32_add (&tb->accum.f, &tb->accum.f, &tv1);
+        chafa_vec3f32_round (&tb->accum.f, &tb->accum.f);
+        chafa_vec3f32_mul_scalar (&tb->accum.f, &tb->accum.f, d);
 
-        tb->count += n2;
+        tb->count.f += n2;
         tb->mtm = ++i;
 
         bins [nb->prev].next = nb->next;
@@ -708,7 +795,7 @@ pnn_palette (ChafaPalette *pal, gconstpointer pixels,
     {
         ChafaColor col = { 0 };
 
-        color_from_vec3f32_trunc (&col, &bins [i].accum);
+        color_from_vec3f32_round (&col, &bins [i].accum.f);
         col.ch [3] = 0xff;
 
         pal->colors [k].col [CHAFA_COLOR_SPACE_RGB] = col;
@@ -726,15 +813,19 @@ out:
     return k + 1;
 }
 
+/* Snap the RGB colors of pens [first, first + n) to the palette's channel
+ * resolution and derive their DIN99d colors from the result */
 static void
-gen_din99d_color_space (ChafaPalette *palette)
+snap_colors (ChafaPalette *palette, gint first, gint n)
 {
     gint i;
 
-    for (i = 0; i < palette->n_colors; i++)
+    for (i = first; i < first + n; i++)
     {
-        chafa_color_rgb_to_din99d (&palette->colors [i].col [CHAFA_COLOR_SPACE_RGB],
-                                   &palette->colors [i].col [CHAFA_COLOR_SPACE_DIN99D]);
+        ChafaColor *rgb = &palette->colors [i].col [CHAFA_COLOR_SPACE_RGB];
+
+        *rgb = chafa_palette_snap_color (palette, *rgb);
+        chafa_color_rgb_to_din99d (rgb, &palette->colors [i].col [CHAFA_COLOR_SPACE_DIN99D]);
     }
 }
 
@@ -759,6 +850,31 @@ gen_table (ChafaPalette *palette, ChafaColorSpace color_space)
     chafa_color_table_sort (&palette->table [color_space]);
 }
 
+/* Generate the lookup tables from the current colors. The RGB table is
+ * always generated; the DIN99d table only if that color space is in use. */
+static void
+gen_tables (ChafaPalette *palette, ChafaColorSpace color_space)
+{
+    gen_table (palette, CHAFA_COLOR_SPACE_RGB);
+
+    if (color_space == CHAFA_COLOR_SPACE_DIN99D)
+        gen_table (palette, CHAFA_COLOR_SPACE_DIN99D);
+}
+
+static void
+gen_channel_level_lut (ChafaPalette *palette, gint n_levels)
+{
+    gint i;
+
+    palette->n_channel_levels = n_levels;
+
+    for (i = 0; i < 256; i++)
+    {
+        palette->channel_level_lut [i] =
+            chafa_color_level_to_channel (chafa_color_channel_to_level (i, n_levels), n_levels);
+    }
+}
+
 static void
 clean_up (ChafaPalette *palette_out)
 {
@@ -766,9 +882,9 @@ clean_up (ChafaPalette *palette_out)
     gint best_diff = G_MAXINT;
     gint best_pair = 1;
 
-    /* Reserve 0th pen for transparency and move colors up.
-     * Eliminate duplicates and colors that would be the same in
-     * sixel representation (0..100). */
+    /* Reserve 0th pen for transparency, move colors up and eliminate
+     * duplicates. Since colors have been snapped to the output's channel
+     * resolution, colors that would display the same are exact duplicates. */
 
     DEBUG (g_printerr ("Colors before: %d\n", palette_out->n_colors));
 
@@ -780,13 +896,11 @@ clean_up (ChafaPalette *palette_out)
         a = &palette_out->colors [j - 1].col [CHAFA_COLOR_SPACE_RGB];
         b = &palette_out->colors [i].col [CHAFA_COLOR_SPACE_RGB];
 
-        /* Dividing by 256 is strictly not correct, but it's close enough for
-         * comparison purposes, and a lot faster too. */
-        t = (gint) (a->ch [0] * 100) / 256 - (gint) (b->ch [0] * 100) / 256;
+        t = (gint) a->ch [0] - (gint) b->ch [0];
         diff = t * t;
-        t = (gint) (a->ch [1] * 100) / 256 - (gint) (b->ch [1] * 100) / 256;
+        t = (gint) a->ch [1] - (gint) b->ch [1];
         diff += t * t;
-        t = (gint) (a->ch [2] * 100) / 256 - (gint) (b->ch [2] * 100) / 256;
+        t = (gint) a->ch [2] - (gint) b->ch [2];
         diff += t * t;
 
         if (diff == 0)
@@ -809,7 +923,7 @@ clean_up (ChafaPalette *palette_out)
 
     g_assert (palette_out->n_colors >= 0 && palette_out->n_colors <= 256);
 
-    if (palette_out->transparent_index < 256)
+    if (palette_out->transparent_index < palette_out->n_colors)
     {
         if (palette_out->n_colors < 256)
         {
@@ -835,9 +949,11 @@ chafa_palette_init (ChafaPalette *palette_out, ChafaPaletteType type)
 {
     gint i;
 
+    memset (palette_out, 0, sizeof (*palette_out));
     chafa_init_palette ();
     palette_out->type = type;
     palette_out->transparent_index = CHAFA_PALETTE_INDEX_TRANSPARENT;
+    gen_channel_level_lut (palette_out, 256);
 
     for (i = 0; i < CHAFA_PALETTE_INDEX_MAX; i++)
     {
@@ -914,6 +1030,7 @@ chafa_palette_generate (ChafaPalette *palette_out, gconstpointer pixels, gsize n
                         ChafaColorSpace color_space, gfloat quality)
 {
     const QualityParams *params;
+    ChafaColor bg;
     gsize step;
 
     if (palette_out->type != CHAFA_PALETTE_TYPE_DYNAMIC_256)
@@ -938,18 +1055,22 @@ chafa_palette_generate (ChafaPalette *palette_out, gconstpointer pixels, gsize n
     palette_out->n_colors = pnn_palette (palette_out,
                                          pixels,
                                          n_pixels,
-                                         255,
+                                         254, /* One pen is kept for the BG */
                                          params->bits_per_ch,
                                          step,
-                                         palette_out->alpha_threshold);
-    clean_up (palette_out);
-    gen_table (palette_out, CHAFA_COLOR_SPACE_RGB);
+                                         MAX (palette_out->alpha_threshold, 1));
 
-    if (color_space == CHAFA_COLOR_SPACE_DIN99D)
-    {
-        gen_din99d_color_space (palette_out);
-        gen_table (palette_out, CHAFA_COLOR_SPACE_DIN99D);
-    }
+    /* Append BG color to the dynamic 0-255 range */
+    bg = palette_out->colors [CHAFA_PALETTE_INDEX_BG].col [CHAFA_COLOR_SPACE_RGB];
+    bg.ch [3] = 0xff;
+    palette_out->colors [palette_out->n_colors].col [CHAFA_COLOR_SPACE_RGB] = bg;
+    palette_out->n_colors++;
+
+    /* Snap before deduplicating, so colors that would display the same
+     * are exact duplicates */
+    snap_colors (palette_out, 0, palette_out->n_colors);
+    clean_up (palette_out);
+    gen_tables (palette_out, color_space);
 }
 
 gint
@@ -1092,8 +1213,7 @@ void
 chafa_palette_set_color (ChafaPalette *palette, gint index, const ChafaColor *color)
 {
     palette->colors [index].col [CHAFA_COLOR_SPACE_RGB] = *color;
-    chafa_color_rgb_to_din99d (&palette->colors [index].col [CHAFA_COLOR_SPACE_RGB],
-                               &palette->colors [index].col [CHAFA_COLOR_SPACE_DIN99D]);
+    snap_colors (palette, index, 1);
 }
 
 gint
@@ -1120,3 +1240,30 @@ chafa_palette_set_transparent_index (ChafaPalette *palette, gint index)
     palette->transparent_index = index;
 }
 
+gint
+chafa_palette_get_channel_levels (const ChafaPalette *palette)
+{
+    return palette->n_channel_levels;
+}
+
+void
+chafa_palette_set_channel_levels (ChafaPalette *palette, gint n_levels)
+{
+    g_return_if_fail (n_levels >= 2 && n_levels <= 256);
+
+    if (n_levels == palette->n_channel_levels)
+        return;
+
+    gen_channel_level_lut (palette, n_levels);
+    snap_colors (palette, 0, CHAFA_PALETTE_INDEX_MAX);
+
+    /* Rebuild any lookup tables generated from the old colors */
+
+    if (palette->type == CHAFA_PALETTE_TYPE_DYNAMIC_256
+        && palette->table [CHAFA_COLOR_SPACE_RGB].n_entries > 0)
+    {
+        gen_tables (palette,
+                    palette->table [CHAFA_COLOR_SPACE_DIN99D].n_entries > 0
+                    ? CHAFA_COLOR_SPACE_DIN99D : CHAFA_COLOR_SPACE_RGB);
+    }
+}

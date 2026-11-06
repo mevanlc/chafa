@@ -291,6 +291,9 @@ static const SeqStr sixel_seqs [] =
     { CHAFA_TERM_SEQ_MAX, NULL }
 };
 
+/* FIXME: UP_KEY, DOWN_KEY, LEFT_KEY, RIGHT_KEY conflict with CURSOR_UP_1 etc.
+ * Currently we install the key seqs first so the latter can override, but we
+ * need to find a more elegant way to resolve the dual definition. */
 static const SeqStr default_key_seqs [] =
 {
     { CHAFA_TERM_SEQ_RETURN_KEY, "\x0d" },  /* ASCII CR */
@@ -568,6 +571,7 @@ static const ChafaTermSeq lf_inherit_seqs [] =
 
 static const SeqStr *fallback_list [] =
 {
+    default_key_seqs,
     vt220_seqs,
     color_direct_seqs,
     color_256_seqs,
@@ -1066,6 +1070,10 @@ new_term_info_from_def (const TermDef *def)
     chafa_term_info_set_quirks (ti, def->quirks);
     chafa_term_info_set_safe_symbol_tags (ti, def->safe_symbol_tags);
 
+    /* Every terminal gets the default key sequences first, so a
+     * definition's own lists can override them. */
+    add_seqs (ti, default_key_seqs);
+
     for (i = 0; i < SEQ_LIST_MAX && seqs [i]; i++)
     {
         add_seqs (ti, seqs [i]);
@@ -1106,6 +1114,7 @@ detect_term_of_type (TermType term_type, gchar **envp)
         pri = match_term_def (&term_def [i], envp);
         if (pri > best_pri
             || (pri == best_pri
+                && best_def_i >= 0
                 && !strcmp_wrap (term_def [i].name, term_def [best_def_i].name)
                 && ((term_def [i].variant && !term_def [best_def_i].variant)
                     || (!strcmp_wrap (term_def [i].variant, term_def [best_def_i].variant)
@@ -1205,6 +1214,8 @@ ChafaTermDb *
 chafa_term_db_copy (const ChafaTermDb *term_db)
 {
     ChafaTermDb *new_term_db;
+
+    g_return_val_if_fail (term_db != NULL, NULL);
 
     new_term_db = g_new (ChafaTermDb, 1);
     memcpy (new_term_db, term_db, sizeof (ChafaTermDb));

@@ -25,6 +25,9 @@
 
 G_BEGIN_DECLS
 
+/* The scale/render pipeline handles at most this many pixels per side */
+#define CHICLE_IMAGE_EXTENT_PX_MAX 65535
+
 typedef enum
 {
     CHICLE_ROTATION_NONE = 0,
@@ -45,6 +48,8 @@ ChicleRotationType;
 ChicleRotationType chicle_invert_rotation (ChicleRotationType rot);
 void chicle_rotate_image (gpointer *src, guint *width, guint *height, guint *rowstride,
                           guint n_channels, ChicleRotationType rot);
+gboolean chicle_calc_image_buffer_size (guint64 width, guint64 height, guint64 n_channels,
+                                        guint64 max_size, gsize *size_out);
 
 void chicle_flatten_cntrl_inplace (gchar *str);
 gchar *chicle_ellipsize_string (const gchar *str, gint len_max,
@@ -54,6 +59,10 @@ gchar *chicle_path_get_ellipsized_basename (const gchar *path, gint len_max,
 void chicle_print_rep_char (ChafaTerm *term, gchar c, gint n);
 void chicle_path_print_label (ChafaTerm *term, const gchar *path, ChafaAlign halign,
                               gint field_width, gboolean use_unicode, gboolean link_label);
+
+gboolean chicle_stdin_is_open (void);
+
+gboolean chicle_run_tmux_cmd (gchar **standard_output_out, ...) G_GNUC_NULL_TERMINATED;
 
 G_END_DECLS
 

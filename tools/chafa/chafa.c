@@ -174,6 +174,8 @@ install_interrupt_handler (void)
     sa.sa_flags = 0;
 
     sigaction (SIGINT, &sa, NULL);
+    sigaction (SIGTERM, &sa, NULL);
+    sigaction (SIGHUP, &sa, NULL);
 }
 
 #endif
@@ -637,6 +639,38 @@ calc_prescale_size_px (gint *prescale_width_out, gint *prescale_height_out)
     *prescale_height_out = MAX (*prescale_height_out, 160);
 }
 
+static gboolean
+check_frame_dimensions (gint width, gint height)
+{
+    gboolean result = FALSE;
+
+    /* Extra check for loader-supplied dimensions that would push the
+     * scale/render pipeline into pathological allocations. A 256 Mpx
+     * source covers 16384*16384. */
+    if (width > 0 && height > 0
+        && ((guint64) width * (guint64) height
+            > (guint64) 256 * 1024 * 1024))
+    {
+        g_printerr ("%s: Source image dimensions %dx%d exceed maximum (256Mpx).\n",
+                    options.executable_name, width, height);
+        goto out;
+    }
+
+    /* The scaler handles at most CHICLE_IMAGE_EXTENT_PX_MAX pixels per side */
+    if (width > CHICLE_IMAGE_EXTENT_PX_MAX || height > CHICLE_IMAGE_EXTENT_PX_MAX)
+    {
+        g_printerr ("%s: Source image dimensions %dx%d exceed maximum (%d px per side).\n",
+                    options.executable_name, width, height,
+                    CHICLE_IMAGE_EXTENT_PX_MAX);
+        goto out;
+    }
+
+    result = TRUE;
+
+out:
+    return result;
+}
+
 static RunResult
 run_generic (const gchar *filename, ChicleMediaLoader *media_loader,
              gboolean is_first_file, gboolean is_first_frame)
@@ -723,6 +757,12 @@ run_generic (const gchar *filename, ChicleMediaLoader *media_loader,
              * Needs refactoring. */
             if (!pixels)
                 break;
+
+            if (!check_frame_dimensions (src_width, src_height))
+            {
+                result = FILE_FAILED;
+                break;
+            }
 
             delay_ms = chicle_media_loader_get_frame_delay (media_loader);
 
@@ -965,6 +1005,8 @@ run_vertical (ChiclePathQueue *path_queue)
     /* Emit linefeed after last image when cursor was not in parking row */
     if (!options.have_parking_row)
         chafa_term_write (term, "\n", 1);
+
+    chicle_media_pipeline_destroy (pipeline);
 
     /* Zero files processed is not a failure, since we may be processing an
      * empty file list. */

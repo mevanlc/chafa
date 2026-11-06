@@ -11,6 +11,9 @@
 extern "C" {
 #endif
 
+/* Largest source or destination dimension (in pixels) we accept. */
+#define SMOL_DIM_MAX 65535
+
 #define SMOL_SUBPIXEL_SHIFT 8
 #define SMOL_SUBPIXEL_MUL (1 << (SMOL_SUBPIXEL_SHIFT))
 
@@ -20,11 +23,18 @@ extern "C" {
 #define SMOL_PX_TO_SPX(px) ((px) * (SMOL_SUBPIXEL_MUL))
 #define SMOL_SPX_TO_PX(spx) (((spx) + (SMOL_SUBPIXEL_MUL) - 1) / (SMOL_SUBPIXEL_MUL))
 
+/* Layer opacity is expressed in 1/256 units, with SMOL_OPACITY_MAX (256)
+ * being fully opaque. */
+#define SMOL_OPACITY_SHIFT 8
+#define SMOL_OPACITY_MAX (1 << (SMOL_OPACITY_SHIFT))
+
 typedef enum
 {
     SMOL_NO_FLAGS                   = 0,
     SMOL_DISABLE_ACCELERATION       = (1 << 0),
-    SMOL_DISABLE_SRGB_LINEARIZATION = (1 << 1)
+    SMOL_DISABLE_SRGB_LINEARIZATION = (1 << 1),
+    SMOL_CLEAR_DEST                 = (1 << 2),
+    SMOL_INTERP_NEAREST             = (1 << 3)
 }
 SmolFlags;
 
@@ -53,11 +63,18 @@ SmolPixelType;
 
 typedef enum
 {
-    SMOL_COMPOSITE_SRC,
-    SMOL_COMPOSITE_SRC_CLEAR_DEST,
-    SMOL_COMPOSITE_SRC_OVER_DEST
+    SMOL_COMPOSITE_SRC_OVER_COLOR = 1,
+    SMOL_COMPOSITE_SRC_OVER_DEST,
+    SMOL_COMPOSITE_SRC_OVER_COLOR_SRC_ALPHA
 }
 SmolCompositeOp;
+
+/* Called by the batch functions after each destination row has been
+ * written, with a pointer to the row, the destination width in pixels,
+ * and the user_data handed to smol_scale_new_full(). The row may be
+ * modified in place. Every row in the batch range is reported, including
+ * rows the placement doesn't touch. With concurrent batch calls, the
+ * callback runs on the batch's calling thread. */
 
 typedef void (SmolPostRowFunc) (void *row_inout,
                                 int width,
@@ -65,21 +82,55 @@ typedef void (SmolPostRowFunc) (void *row_inout,
 
 typedef struct SmolScaleCtx SmolScaleCtx;
 
+/* For all entry points below, src_pixels must be non-NULL, the pixel types
+ * must be valid SmolPixelType values, and each source and destination
+ * dimension must be in the range [1, 65535]. Calls that violate this fail
+ * the same way as an allocation failure (returning 0 or NULL).
+ *
+ * Placements (smol_scale_new_full()) are given in subpixels (1/256 px, see
+ * SMOL_PX_TO_SPX()) and may extend beyond the destination or lie entirely
+ * outside it. The visible part is rendered as a window into the virtual
+ * placement, and the rest is clipped away. A placement with zero visible
+ * extent draws nothing (SMOL_CLEAR_DEST still clears the destination).
+ * The full int32 ranges of the placement parameters are accepted.
+ *
+ * color_pixel (smol_scale_new_full()) optionally points to a single pixel
+ * of type color_pixel_type for the source to be composited over. It may be
+ * NULL for no color. A fully transparent black color is treated the same
+ * as no color. color_pixel_type must be a valid SmolPixelType whenever
+ * color_pixel is non-NULL. composite_opacity is a layer opacity in
+ * [0, SMOL_OPACITY_MAX], where SMOL_OPACITY_MAX (256) is fully opaque;
+ * higher values are clamped.
+ *
+ * SMOL_COMPOSITE_SRC_OVER_COLOR_SRC_ALPHA blends the color channels like
+ * SMOL_COMPOSITE_SRC_OVER_COLOR, but treats the color as an opaque
+ * backdrop (its alpha is ignored) and emits the source's own coverage as
+ * the destination alpha instead of the composited alpha. Useful when the
+ * caller needs colors flattened against a known background while keeping
+ * each pixel's original coverage for further compositing. With SMOL_CLEAR_DEST,
+ * the area outside the placement is filled with the color at zero
+ * coverage.
+ *
+ * dest_pixels may be NULL in the context constructors if every batch call
+ * will supply its own output pointer via smol_scale_batch_full(). */
+
 /* Simple API: Scales an entire image in one shot. You must provide pointers to
  * the source memory and an existing allocation to receive the output data.
- * This interface can only be used from a single thread. */
+ * This interface can only be used from a single thread.
+ *
+ * Returns 1 on success, 0 on invalid arguments or memory allocation failure. */
 
-void smol_scale_simple (const void *src_pixels,
-                        SmolPixelType src_pixel_type,
-                        uint32_t src_width,
-                        uint32_t src_height,
-                        uint32_t src_rowstride,
-                        void *dest_pixels,
-                        SmolPixelType dest_pixel_type,
-                        uint32_t dest_width,
-                        uint32_t dest_height,
-                        uint32_t dest_rowstride,
-                        SmolFlags flags);
+int smol_scale_simple (const void *src_pixels,
+                       SmolPixelType src_pixel_type,
+                       uint32_t src_width,
+                       uint32_t src_height,
+                       uint32_t src_rowstride,
+                       void *dest_pixels,
+                       SmolPixelType dest_pixel_type,
+                       uint32_t dest_width,
+                       uint32_t dest_height,
+                       uint32_t dest_rowstride,
+                       SmolFlags flags);
 
 /* Batch API: Allows scaling a few rows at a time. Suitable for multithreading. */
 
@@ -112,6 +163,7 @@ SmolScaleCtx *smol_scale_new_full (const void *src_pixels,
                                    uint32_t placement_width,
                                    uint32_t placement_height,
                                    SmolCompositeOp composite_op,
+                                   uint16_t composite_opacity,
                                    SmolFlags flags,
                                    SmolPostRowFunc post_row_func,
                                    void *user_data);
@@ -120,17 +172,24 @@ void smol_scale_destroy (SmolScaleCtx *scale_ctx);
 
 /* It's ok to call smol_scale_batch() without locking from multiple concurrent
  * threads, as long as the outrows do not overlap. Make sure all workers are
- * finished before you call smol_scale_destroy(). */
+ * finished before you call smol_scale_destroy().
+ *
+ * The row range is clamped to the destination extent. A range with no
+ * visible rows is a no-op.
+ *
+ * Returns 1 on success (including no-op), or 0 on memory allocation failure. */
 
-void smol_scale_batch (const SmolScaleCtx *scale_ctx, int32_t first_outrow, int32_t n_outrows);
+int smol_scale_batch (const SmolScaleCtx *scale_ctx, int32_t first_outrow, int32_t n_outrows);
 
 /* Like smol_scale_batch(), but will write the output rows to outrows_dest
- * instead of relative to pixels_out address handed to smol_scale_new(). The
- * other parameters from init (size, rowstride, etc) will still be used. */
+ * instead of relative to the dest_pixels address handed to smol_scale_new().
+ * The other parameters from init (size, rowstride, etc) will still be used.
+ *
+ * Returns 1 on success (including no-op), or 0 on memory allocation failure. */
 
-void smol_scale_batch_full (const SmolScaleCtx *scale_ctx,
-                            void *outrows_dest,
-                            int32_t first_outrow, int32_t n_outrows);
+int smol_scale_batch_full (const SmolScaleCtx *scale_ctx,
+                           void *outrows_dest,
+                           int32_t first_outrow, int32_t n_outrows);
 
 #ifdef __cplusplus
 }

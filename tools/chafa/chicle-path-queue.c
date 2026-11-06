@@ -96,6 +96,13 @@ path_source_destroy (PathSource *src)
     g_free (src);
 }
 
+/* GDestroyNotify wrapper for path_source_destroy() */
+static void
+destroy_path_source (gpointer data)
+{
+    path_source_destroy (data);
+}
+
 static gboolean
 path_source_is_stdin (PathSource *src)
 {
@@ -160,7 +167,8 @@ open_current_stream (ChiclePathQueue *path_queue)
 
     if (fd >= 0)
         path_queue->current_reader = chafa_stream_reader_new_from_fd_full (
-            fd, path_queue->current_src->separator, path_queue->current_src->separator_len);
+            fd, path_queue->current_src->separator, path_queue->current_src->separator_len,
+            PATH_TOKEN_LEN_MAX);
 }
 
 /* Ensure there's a current_src and that it's not empty. For streams, this
@@ -188,28 +196,6 @@ ensure_current_src (ChiclePathQueue *path_queue)
     return FALSE;
 }
 
-static void
-destroy_path_source (gpointer data)
-{
-    PathSource *src = data;
-
-    switch (src->type)
-    {
-        case PATH_SOURCE_PATH:
-            g_free (src->data);
-            break;
-
-        case PATH_SOURCE_PATH_LIST:
-            g_list_free_full (src->data, g_free);
-            break;
-
-        case PATH_SOURCE_STREAM:
-            g_free (src->data);
-            g_free (src->separator);
-            break;
-    }
-}
-
 static gboolean
 pop_stream_path_token (ChiclePathQueue *path_queue)
 {
@@ -220,15 +206,15 @@ pop_stream_path_token (ChiclePathQueue *path_queue)
     if (path_queue->current_path_token)
         return TRUE;
 
-    /* Discard blank lines until we encounter a non-blank line or an error */
-    while (result == 0)
+    /* Discard blank lines and oversized tokens until we encounter a usable
+     * line or run out of input. */
+    while (result == 0 || result == CHAFA_STREAM_READER_ERROR_DISCARDED_TOKEN)
     {
         g_free (path_queue->current_path_token);
         path_queue->current_path_token = NULL;
 
         result = chafa_stream_reader_read_token (path_queue->current_reader,
-                                                 (gpointer *) &path_queue->current_path_token,
-                                                 PATH_TOKEN_LEN_MAX);
+                                                 (gpointer *) &path_queue->current_path_token);
         if (result > 0 && !strcmp (path_queue->current_src->separator, "\n"))
         {
             /* If we're separating on \n, handle \r\n by eliminating the \r too */
@@ -361,6 +347,7 @@ chicle_path_queue_try_pop (ChiclePathQueue *path_queue)
     {
         case PATH_SOURCE_PATH:
             path = path_queue->current_src->data;
+            path_queue->current_src->data = NULL;
             clear_current_src (path_queue);
             break;
         case PATH_SOURCE_PATH_LIST:

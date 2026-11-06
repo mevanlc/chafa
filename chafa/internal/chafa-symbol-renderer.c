@@ -510,18 +510,11 @@ apply_fill_fg_only (ChafaCanvas *canvas, const ChafaWorkCell *wcell, ChafaCanvas
 
     cell->bg_color = transparent_cell_color (canvas->config.canvas_mode);
 
-    /* FIXME: Do we care enough to weight channels properly here, or convert from DIN99d?
-     * Output looks acceptable without. Would have to check if it makes a noticeable
-     * difference. */
-    fg_value = (canvas->default_colors.colors [CHAFA_COLOR_PAIR_FG].ch [0]
-                + canvas->default_colors.colors [CHAFA_COLOR_PAIR_FG].ch [1]
-                + canvas->default_colors.colors [CHAFA_COLOR_PAIR_FG].ch [2])
-               / 3;
-    bg_value = (canvas->default_colors.colors [CHAFA_COLOR_PAIR_BG].ch [0]
-                + canvas->default_colors.colors [CHAFA_COLOR_PAIR_BG].ch [1]
-                + canvas->default_colors.colors [CHAFA_COLOR_PAIR_BG].ch [2])
-               / 3;
-    mean_value = (mean.ch [0] + mean.ch [1] + mean.ch [2]) / 3;
+    fg_value = chafa_color_brightness (&canvas->default_colors.colors [CHAFA_COLOR_PAIR_FG],
+                                       canvas->config.color_space);
+    bg_value = chafa_color_brightness (&canvas->default_colors.colors [CHAFA_COLOR_PAIR_BG],
+                                       canvas->config.color_space);
+    mean_value = chafa_color_brightness (&mean, canvas->config.color_space);
 
     n_bits = ((mean_value * 64) + 128) / 255;
     if (fg_value < bg_value)
@@ -918,9 +911,7 @@ update_cells (ChafaCanvas *canvas)
 }
 
 ChafaSymbolRenderer *
-chafa_symbol_renderer_new (ChafaCanvas *canvas,
-			   gint x, gint y,
-			   gint width, gint height)
+chafa_symbol_renderer_new (ChafaCanvas *canvas)
 {
     ChafaSymbolRenderer *renderer;
 
@@ -937,12 +928,11 @@ chafa_symbol_renderer_destroy (ChafaSymbolRenderer *renderer)
 
 void
 chafa_symbol_renderer_draw_all_pixels (ChafaSymbolRenderer *renderer,
-				       ChafaPixelType src_pixel_type,
-				       gconstpointer src_pixels,
-				       gint src_width, gint src_height, gint src_rowstride,
-				       ChafaAlign halign, ChafaAlign valign,
-				       ChafaTuck tuck,
-				       gfloat quality)
+                                       ChafaPixelType src_pixel_type,
+                                       gconstpointer src_pixels,
+                                       gint src_width, gint src_height, gint src_rowstride,
+                                       ChafaAlign halign, ChafaAlign valign,
+                                       ChafaTuck tuck)
 {
     ChafaCanvas *canvas;
 
@@ -960,54 +950,54 @@ chafa_symbol_renderer_draw_all_pixels (ChafaSymbolRenderer *renderer,
     canvas->pixels = g_try_new (ChafaPixel, (gsize) canvas->width_pixels * canvas->height_pixels);
     if (canvas->pixels)
     {
-	chafa_prepare_pixel_data_for_symbols (&canvas->fg_palette, &canvas->dither,
-					      canvas->config.color_space,
-					      canvas->config.preprocessing_enabled,
-					      canvas->work_factor_int,
-					      src_pixel_type,
-					      src_pixels,
-					      src_width, src_height,
-					      src_rowstride,
-					      canvas->pixels,
-					      canvas->width_pixels, canvas->height_pixels,
-					      canvas->config.cell_width,
-					      canvas->config.cell_height,
-					      halign, valign,
-					      tuck);
+        chafa_prepare_pixel_data_for_symbols (&canvas->fg_palette, &canvas->dither,
+                                              canvas->config.color_space,
+                                              canvas->config.preprocessing_enabled,
+                                              canvas->work_factor_int,
+                                              src_pixel_type,
+                                              src_pixels,
+                                              src_width, src_height,
+                                              src_rowstride,
+                                              canvas->pixels,
+                                              canvas->width_pixels, canvas->height_pixels,
+                                              canvas->config.cell_width,
+                                              canvas->config.cell_height,
+                                              halign, valign,
+                                              tuck);
 
-	if (canvas->config.alpha_threshold == 0)
-	    canvas->have_alpha = FALSE;
+        if (canvas->config.alpha_threshold == 0)
+            canvas->have_alpha = FALSE;
 
-	/* chafa-syms-rs parity oracle: dump the post-prep pixel grid (raw RGBA
-	 * ChafaPixel bytes) so the Rust selection core can be fed chafa's exact
-	 * pixels, isolating Phase 4 (selection) from the pixel pipeline. Header
-	 * line "W H\n" then W*H*4 raw bytes. No effect unless CHAFA_DUMP_PIXELS set. */
-	{
-	    const gchar *pp = g_getenv ("CHAFA_DUMP_PIXELS");
-	    if (pp)
-	    {
-		FILE *pf = fopen (pp, "wb");
-		if (pf)
-		{
-		    fprintf (pf, "%d %d\n", canvas->width_pixels, canvas->height_pixels);
-		    fwrite (canvas->pixels, sizeof (ChafaPixel),
-			    (size_t) canvas->width_pixels * canvas->height_pixels, pf);
-		    fclose (pf);
-		}
-	    }
-	}
+        /* chafa-syms-rs parity oracle: dump the post-prep pixel grid (raw RGBA
+         * ChafaPixel bytes) so the Rust selection core can be fed chafa's exact
+         * pixels, isolating Phase 4 (selection) from the pixel pipeline. Header
+         * line "W H\n" then W*H*4 raw bytes. No effect unless CHAFA_DUMP_PIXELS set. */
+        {
+            const gchar *pp = g_getenv ("CHAFA_DUMP_PIXELS");
+            if (pp)
+            {
+                FILE *pf = fopen (pp, "wb");
+                if (pf)
+                {
+                    fprintf (pf, "%d %d\n", canvas->width_pixels, canvas->height_pixels);
+                    fwrite (canvas->pixels, sizeof (ChafaPixel),
+                            (size_t) canvas->width_pixels * canvas->height_pixels, pf);
+                    fclose (pf);
+                }
+            }
+        }
 
-	update_cells (canvas);
-	canvas->needs_clear = FALSE;
+        update_cells (canvas);
+        canvas->needs_clear = FALSE;
 
-	g_free (canvas->pixels);
-	canvas->pixels = NULL;
+        g_free (canvas->pixels);
+        canvas->pixels = NULL;
     }
     else
     {
 #if 0
-	g_warning ("ChafaCanvas: Out of memory allocating %ux%u pixels.",
-		   canvas->width_pixels, canvas->height_pixels);
+        g_warning ("ChafaCanvas: Out of memory allocating %ux%u pixels.",
+                   canvas->width_pixels, canvas->height_pixels);
 #endif
     }
 }

@@ -34,6 +34,12 @@
 
 G_BEGIN_DECLS
 
+#if defined(__clang__)
+# define CHAFA_NO_SANITIZE_INTEGER __attribute__ ((no_sanitize ("integer")))
+#else
+# define CHAFA_NO_SANITIZE_INTEGER
+#endif
+
 /* Character symbols and symbol classes */
 
 #define CHAFA_N_SYMBOLS_MAX 2048  /* For static temp arrays */
@@ -219,6 +225,12 @@ gint chafa_calc_cell_error_avx2 (const ChafaPixel *pixels, const ChafaColorPair 
 void chafa_extract_cell_mean_colors_avx2 (const ChafaPixel *pixels, ChafaColorAccum *accums_out,
                                           const guint32 *sym_mask_u32);
 void chafa_color_accum_div_scalar_avx2 (ChafaColorAccum *accum, guint16 divisor);
+gint chafa_find_nearest_u32_avx2 (const guint32 *array, gint n, guint32 want);
+gint chafa_find_nearest_u32_dist_avx2 (const guint32 *array, gint n, guint32 want, gint *dist_out);
+void chafa_dither_pixels_avx2 (const guint32 *src, guint32 *dst,
+                               const guint8 *pos_row, const guint8 *neg_row,
+                               gint grain_shift, guint col_mask, guint col,
+                               gint n);
 #endif
 
 #if defined(HAVE_POPCNT64_INTRINSICS) || defined(HAVE_POPCNT32_INTRINSICS)
@@ -238,7 +250,7 @@ static inline guint64 chafa_slow_pop_count (guint64 v) G_GNUC_UNUSED;
 static inline gint chafa_population_count_u64 (guint64 v) G_GNUC_UNUSED;
 static inline void chafa_population_count_vu64 (const guint64 *vv, gint *vc, gint n) G_GNUC_UNUSED;
 
-__attribute__ ((no_sanitize ("integer")))
+CHAFA_NO_SANITIZE_INTEGER
 static inline guint64
 chafa_slow_pop_count (guint64 v)
 {

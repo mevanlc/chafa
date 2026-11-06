@@ -31,6 +31,7 @@
 #include <chafa.h>
 #include <libheif/heif.h>
 #include "chicle-heif-loader.h"
+#include "chicle-util.h"
 
 #define BYTES_PER_PIXEL 4
 #define IMAGE_BUFFER_SIZE_MAX (0xffffffffU >> 2)
@@ -117,17 +118,16 @@ chicle_heif_loader_new_from_mapping (ChicleFileMapping *mapping)
     loader->width = heif_image_get_primary_width (loader->image);
     loader->height = heif_image_get_primary_height (loader->image);
 
-    if (loader->width < 1 || loader->width >= (1 << 28)
-        || loader->height < 1 || loader->height >= (1 << 28))
-        goto out;
-
-    if ((unsigned int) loader->width * loader->height * BYTES_PER_PIXEL > IMAGE_BUFFER_SIZE_MAX)
+    if (!chicle_calc_image_buffer_size (loader->width, loader->height, BYTES_PER_PIXEL,
+                                        IMAGE_BUFFER_SIZE_MAX, NULL))
         goto out;
 
     loader->frame_data = heif_image_get_plane_readonly (loader->image,
                                                         heif_channel_interleaved,
                                                         &loader->stride);
     if (!loader->frame_data || loader->stride < 1)
+        goto out;
+    if ((guint64) loader->stride * (guint64) loader->height > IMAGE_BUFFER_SIZE_MAX)
         goto out;
 
     success = TRUE;

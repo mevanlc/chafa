@@ -72,6 +72,7 @@ gint
 chafa_event_get_seq_arg (ChafaEvent *event, gint n)
 {
     g_return_val_if_fail (event != NULL, -1);
+    g_return_val_if_fail (n >= 0, -1);
 
     if (event->type != CHAFA_SEQ_EVENT
         || n >= event->n_seq_args)
@@ -111,6 +112,8 @@ ChafaParser *
 chafa_parser_new (ChafaTermInfo *term_info)
 {
     ChafaParser *parser;
+
+    g_return_val_if_fail (term_info != NULL, NULL);
 
     parser = g_new0 (ChafaParser, 1);
     chafa_parser_init (parser, term_info);
@@ -164,6 +167,8 @@ chafa_parser_pop_event (ChafaParser *parser)
     {
         ChafaParseResult result;
         ChafaEvent temp_event;
+
+        memset (&temp_event, 0, sizeof (temp_event));
 
         result = chafa_term_info_parse_seq_varargs (parser->term_info, i,
                                                     &p0, &len,

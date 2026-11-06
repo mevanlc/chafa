@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <string.h>  /* strspn, strlen, strcmp, strncmp, memset */
 #include <locale.h>  /* setlocale */
+#include <math.h>  /* isnan, isinf */
 #ifdef HAVE_SYS_IOCTL_H
 # include <sys/ioctl.h>  /* ioctl */
 #endif
@@ -33,7 +34,7 @@
 #ifdef HAVE_SIGACTION
 # include <signal.h>  /* sigaction */
 #endif
-#include <stdlib.h>  /* exit */
+#include <stdlib.h>  /* exit, strtol */
 #ifdef HAVE_TERMIOS_H
 # include <termios.h>  /* tcgetattr, tcsetattr */
 #endif
@@ -66,6 +67,9 @@ ChiclePathQueue *global_path_queue;
 gint global_path_queue_n_stdin;
 gint global_n_path_streams;
 ChafaTerm *term;
+
+static gchar *tmux_allow_passthrough_original;
+static gboolean tmux_allow_passthrough_is_changed;
 
 static guchar
 get_hex_byte (const gchar *str)
@@ -167,7 +171,8 @@ collect_variable_arguments (int *argc, char **argv [], gint first_arg)
 
 static const gchar copyright_notice [] =
     "Copyright (C) 2018-2025 Hans Petter Jansson et al.\n"
-    "Incl. libnsgif copyright (C) 2004 Richard Wilson, copyright (C) 2008 Sean Fox\n"
+    "Incl. libnsgif copyright (C) 2004 Richard Wilson, copyright (C) 2008 Sean Fox,\n"
+    "  copyright (C) 2013-2021 Michael Drake\n"
     "Incl. LodePNG copyright (C) 2005-2018 Lode Vandevenne\n"
     "Incl. QOI decoder copyright (C) 2021 Dominic Szablewski\n\n"
     "This is free software; see the source for copying conditions. There is NO\n"
@@ -300,7 +305,8 @@ print_summary (void)
     "                     diffusion, noise]. No effect with 24-bit color. Defaults to\n"
     "                     noise for sixels, none otherwise.\n"
     "      --dither-grain=WxH  Set dimensions of dither grains in 1/8ths of a\n"
-    "                     character cell [1, 2, 4, 8]. Defaults to 4x4.\n"
+    "                     character cell [1, 2, 4, 8]. Defaults to 4x4 for symbols,\n"
+    "                     1x1 otherwise.\n"
     "      --dither-intensity=NUM  Multiplier for dither intensity [0.0 - inf].\n"
     "                     Defaults to 1.0.\n"
     "      --fg=COLOR     Foreground color of display (color name or hex).\n"
@@ -329,10 +335,11 @@ print_summary (void)
 
     "\nAccepted classes for --symbols and --fill:\n"
 
-    "  all        ascii   braille   extra      imported  narrow   solid      ugly\n"
-    "  alnum      bad     diagonal  geometric  inverted  none     space      vhalf\n"
-    "  alpha      block   digit     half       latin     quad     stipple    wedge\n"
-    "  ambiguous  border  dot       hhalf      legacy    sextant  technical  wide\n"
+    "  all        bad       digit      hhalf     narrow   solid      vhalf\n"
+    "  alnum      block     dot        imported  none     space      wedge\n"
+    "  alpha      border    extra      inverted  octant   stipple    wide\n"
+    "  ambiguous  braille   geometric  latin     quad     technical\n"
+    "  ascii      diagonal  half       legacy    sextant  ugly\n"
 
     "\n  These can be combined with + and -, e.g. block+border-diagonal or all-wide.\n"
 
@@ -416,8 +423,11 @@ parse_probe_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_G
         gchar *endptr;
 
         d = g_strtod (value, &endptr);
-        if (endptr == value || d <= 0.0)
+        if (endptr == value || isnan (d) || d <= 0.0)
             goto out;
+
+        if (isinf (d))
+            d = G_MAXDOUBLE;
 
         options.probe = CHICLE_TRISTATE_TRUE;
         options.probe_duration = d;
@@ -563,7 +573,7 @@ utf8_skip_spaces (const gchar *str)
          c != 0 && g_unichar_isspace (c);
          c = g_utf8_get_char (str))
     {
-        str = g_utf8_next_char (str);
+        str = g_utf8_find_next_char (str, NULL);
     }
 
     return str;
@@ -594,7 +604,7 @@ parse_fraction_or_real (const gchar *str, gdouble *real_out)
         if (g_utf8_get_char (end) != '/' && g_utf8_get_char (end) != ':')
             goto out;
 
-        sep = g_utf8_next_char (sep);
+        sep = g_utf8_find_next_char (sep, NULL);
         p0 = utf8_skip_spaces (sep);
         height = g_ascii_strtoll (p0, (gchar **)(intptr_t) &end, 10);
         if (end == p0)
@@ -830,8 +840,17 @@ parse_fill_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GN
 }
 
 static gboolean
-parse_files_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GNUC_UNUSED gpointer data, G_GNUC_UNUSED GError **error)
+parse_files_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GNUC_UNUSED gpointer data, GError **error)
 {
+    if (!strcmp (value, "-") && !chicle_stdin_is_open ())
+    {
+        /* Must be caught before anything else opens a descriptor, or fd 0
+         * gets reused by an internal pipe and the list reader waits forever. */
+        g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+                     "Cannot read file list from standard input; it is closed.");
+        return FALSE;
+    }
+
     global_n_path_streams++;
 
     if (!strcmp (value, "-"))
@@ -842,8 +861,17 @@ parse_files_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_G
 }
 
 static gboolean
-parse_files0_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GNUC_UNUSED gpointer data, G_GNUC_UNUSED GError **error)
+parse_files0_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GNUC_UNUSED gpointer data, GError **error)
 {
+    if (!strcmp (value, "-") && !chicle_stdin_is_open ())
+    {
+        /* Must be caught before anything else opens a descriptor, or fd 0
+         * gets reused by an internal pipe and the list reader waits forever. */
+        g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+                     "Cannot read file list from standard input; it is closed.");
+        return FALSE;
+    }
+
     global_n_path_streams++;
 
     if (!strcmp (value, "-"))
@@ -897,22 +925,47 @@ parse_format_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_
 static void
 parse_2d_size (const gchar *value, gint *width_out, gint *height_out)
 {
-    gint n;
-    gint o = 0;
+    const gchar *p = value;
+    gchar *end;
+    glong n;
 
     *width_out = *height_out = -1;
-    n = sscanf (value, "%d%n", width_out, &o);
 
-    if (value [o] == 'x' && value [o + 1] != '\0')
+    /* Width. May be omitted, as in "x25" */
+    errno = 0;
+    n = strtol (p, &end, 10);
+    if (end != p)
     {
-        gint o2;
+        if (errno == ERANGE || n < 0 || n > G_MAXINT)
+            goto invalid;
 
-        n = sscanf (value + o + 1, "%d%n", height_out, &o2);
-        if (n == 1 && value [o + o2 + 1] != '\0')
+        *width_out = (gint) n;
+        p = end;
+    }
+
+    if (*p != '\0')
+    {
+        if (*p != 'x')
+            goto invalid;
+
+        /* Height. May be omitted after the "x", as in "80x" */
+        p++;
+        if (*p != '\0')
         {
-            *width_out = *height_out = -1;
+            errno = 0;
+            n = strtol (p, &end, 10);
+            if (end == p || *end != '\0'
+                || errno == ERANGE || n < 0 || n > G_MAXINT)
+                goto invalid;
+
+            *height_out = (gint) n;
         }
     }
+
+    return;
+
+invalid:
+    *width_out = *height_out = -1;
 }
 
 static gboolean
@@ -933,6 +986,13 @@ parse_view_size_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value,
     {
         g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
                      "View size must be at least 1x1.");
+        result = FALSE;
+    }
+    else if (width > CHICLE_CELL_EXTENT_AUTO_MAX || height > CHICLE_CELL_EXTENT_AUTO_MAX)
+    {
+        g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+                     "View dimensions must not exceed "
+                     G_STRINGIFY (CHICLE_CELL_EXTENT_AUTO_MAX) ".");
         result = FALSE;
     }
 
@@ -960,6 +1020,13 @@ parse_size_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GN
     {
         g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
                      "Size must be at least 1x1.");
+        result = FALSE;
+    }
+    else if (width > CHICLE_CELL_EXTENT_AUTO_MAX || height > CHICLE_CELL_EXTENT_AUTO_MAX)
+    {
+        g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+                     "Size dimensions must not exceed "
+                     G_STRINGIFY (CHICLE_CELL_EXTENT_AUTO_MAX) ".");
         result = FALSE;
     }
 
@@ -1377,8 +1444,11 @@ parse_anim_speed_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value
         gchar *endptr;
 
         d = g_strtod (value, &endptr);
-        if (endptr == value || d <= 0.0)
+        if (endptr == value || isnan (d) || d <= 0.0)
             goto out;
+
+        if (isinf (d))
+            d = G_MAXDOUBLE;
 
         while (g_ascii_isspace (*endptr))
             endptr++;
@@ -1683,27 +1753,68 @@ detect_terminal (gchar **envp,
     *polite_out = g_environ_getenv (envp, "LF_LEVEL") ? TRUE : FALSE;
 }
 
-static gchar *tmux_allow_passthrough_original;
-static gboolean tmux_allow_passthrough_is_changed;
+/* Asks tmux whether the terminal it's attached to can display sixels. tmux
+ * claims sixel support in its own DA1 response regardless, so probing the
+ * pane can't tell us. However tmux keeps track of its client's features, and
+ * we can query those from the CLI.
+ *
+ * Returns CHICLE_TRISTATE_AUTO if tmux couldn't be asked or gave no answer,
+ * e.g. we're not inside tmux, it's an old version without client features,
+ * or the session has no client. CHICLE_TRISTATE_FALSE means we got a query
+ * response and it's a definite no. */
+static ChicleTristate
+query_tmux_client_sixels (void)
+{
+    ChicleTristate result = CHICLE_TRISTATE_AUTO;
+    gchar *standard_output = NULL;
+    gchar **features;
+    gint i;
+
+    if (!chicle_run_tmux_cmd (&standard_output,
+                              "display-message", "-p", "#{client_termfeatures}", NULL))
+        return result;
+
+    /* Comma-separated, e.g. "bpaste,ccolour,clipboard,cstyle,focus,sixel,title" */
+
+    features = g_strsplit_set (standard_output, ", \t\r\n", -1);
+
+    for (i = 0; features [i]; i++)
+    {
+        if (!*features [i])
+            continue;
+
+        if (!strcmp (features [i], "sixel"))
+        {
+            result = CHICLE_TRISTATE_TRUE;
+            break;
+        }
+
+        /* Features were reported, but sixel isn't among them */
+        result = CHICLE_TRISTATE_FALSE;
+    }
+
+    g_strfreev (features);
+    g_free (standard_output);
+    return result;
+}
 
 gboolean
 chicle_apply_passthrough_workarounds_tmux (void)
 {
     gboolean result = FALSE;
     gchar *standard_output = NULL;
-    gchar *standard_error = NULL;
     gchar **strings;
     gchar *mode = NULL;
-    gint wait_status = -1;
 
     /* allow-passthrough can be either unset, "on" or "all". Both "on" and "all"
      * are fine, so don't mess with it if we don't have to.
      *
      * Also note that we may be in a remote session inside tmux. */
 
-    if (!g_spawn_command_line_sync ("tmux show allow-passthrough",
-                                    &standard_output, &standard_error,
-                                    &wait_status, NULL))
+    g_return_val_if_fail (tmux_allow_passthrough_original == NULL, FALSE);
+    g_return_val_if_fail (tmux_allow_passthrough_is_changed == FALSE, FALSE);
+
+    if (!chicle_run_tmux_cmd (&standard_output, "show", "allow-passthrough", NULL))
         goto out;
 
     strings = g_strsplit_set (standard_output, " ", -1);
@@ -1714,57 +1825,41 @@ chicle_apply_passthrough_workarounds_tmux (void)
     }
     g_strfreev (strings);
 
-    g_free (standard_output);
-    standard_output = NULL;
-    g_free (standard_error);
-    standard_error = NULL;
-
     if (!mode || (strcmp (mode, "on") && strcmp (mode, "all")))
     {
-        result = g_spawn_command_line_sync ("tmux set-option allow-passthrough on",
-                                            &standard_output, &standard_error,
-                                            &wait_status, NULL);
-        if (result)
-        {
-            tmux_allow_passthrough_original = mode;
-            tmux_allow_passthrough_is_changed = TRUE;
-        }
-    }
-    else
-    {
-        g_free (mode);
+        result = chicle_run_tmux_cmd (NULL, "set-option", "allow-passthrough", "on", NULL);
+        if (!result)
+            goto out;
+
+        tmux_allow_passthrough_original = mode;
+        mode = NULL;  /* Transfer ownership */
+        tmux_allow_passthrough_is_changed = TRUE;
     }
 
 out:
+    g_free (mode);
     g_free (standard_output);
-    g_free (standard_error);
     return result;
 }
 
 gboolean
 chicle_retire_passthrough_workarounds_tmux (void)
 {
-    gboolean result = FALSE;
-    gchar *standard_output = NULL;
-    gchar *standard_error = NULL;
-    gchar *cmd = NULL;
-    gint wait_status = -1;
+    gboolean result;
 
     if (!tmux_allow_passthrough_is_changed)
         return TRUE;
 
     if (tmux_allow_passthrough_original)
     {
-        cmd = g_strdup_printf ("tmux set-option allow-passthrough %s",
-                               tmux_allow_passthrough_original);
+        result = chicle_run_tmux_cmd (NULL, "set-option", "allow-passthrough",
+                                      tmux_allow_passthrough_original, NULL);
     }
     else
     {
-        cmd = g_strdup ("tmux set-option -u allow-passthrough");
+        result = chicle_run_tmux_cmd (NULL, "set-option", "-u", "allow-passthrough", NULL);
     }
 
-    result = g_spawn_command_line_sync (cmd, &standard_output, &standard_error,
-                                        &wait_status, NULL);
     if (result)
     {
         g_free (tmux_allow_passthrough_original);
@@ -1772,9 +1867,6 @@ chicle_retire_passthrough_workarounds_tmux (void)
         tmux_allow_passthrough_is_changed = FALSE;
     }
 
-    g_free (cmd);
-    g_free (standard_output);
-    g_free (standard_error);
     return result;
 }
 
@@ -1973,6 +2065,7 @@ chicle_parse_options (int *argc, char **argv [])
         chicle_flatten_cntrl_inplace (safe_message);
         g_printerr ("%s: %s\n", options.executable_name, safe_message);
         g_free (safe_message);
+        g_clear_error (&error);
         goto out;
     }
 
@@ -2042,7 +2135,8 @@ chicle_parse_options (int *argc, char **argv [])
              || options.probe == CHICLE_TRISTATE_AUTO)
             && options.probe_duration >= 0.0)
         {
-            chafa_term_sync_probe (probe_term, options.probe_duration * 1000);
+            chafa_term_sync_probe (probe_term,
+                                   MIN ((options.probe_duration * 1000), (gdouble) G_MAXINT));
 
             if (!options.pixel_mode_set)
             {
@@ -2081,6 +2175,24 @@ chicle_parse_options (int *argc, char **argv [])
             chafa_term_destroy (ctty_term);
     }
 
+    /* tmux answers DA1 with sixel capability on its own behalf, whether or not
+     * the terminal it's attached to can display sixels. Ask if the outer
+     * terminal can do sixels, and turn it off if the answer is a definite no. */
+
+    {
+        ChafaTermInfo *term_info = chafa_term_get_term_info (term);
+
+        if (!options.pixel_mode_set
+            && options.pixel_mode == CHAFA_PIXEL_MODE_SIXELS
+            && chafa_term_info_get_passthrough_type (term_info) == CHAFA_PASSTHROUGH_TMUX
+            && query_tmux_client_sixels () == CHICLE_TRISTATE_FALSE)
+        {
+            chafa_term_info_set_seq (term_info, CHAFA_TERM_SEQ_BEGIN_SIXELS, NULL, NULL);
+            chafa_term_info_set_seq (term_info, CHAFA_TERM_SEQ_END_SIXELS, NULL, NULL);
+            options.pixel_mode = chafa_term_info_get_best_pixel_mode (term_info);
+        }
+    }
+
     /* Fall back on COLUMNS. It's the best we can do in some environments (e.g. CI). */
 
     if (detected_term_size.width_cells < 1)
@@ -2101,6 +2213,10 @@ chicle_parse_options (int *argc, char **argv [])
     {
         options.cell_width = detected_term_size.width_pixels / detected_term_size.width_cells;
         options.cell_height = detected_term_size.height_pixels / detected_term_size.height_cells;
+
+        /* Guard against nonsense from the terminal */
+        options.cell_width = CLAMP (options.cell_width, 1, 1024);
+        options.cell_height = CLAMP (options.cell_height, 1, 1024);
     }
 
     /* Apply the font ratio if specified, or derive it if not */
@@ -2329,7 +2445,9 @@ chicle_parse_options (int *argc, char **argv [])
     {
         options.args = collect_variable_arguments (argc, argv, 1);
     }
-    else if (global_path_queue_n_stdin < 1 && !isatty (STDIN_FILENO))
+    else if (global_path_queue_n_stdin < 1
+             && chicle_path_queue_get_length (global_path_queue) == 0
+             && !isatty (STDIN_FILENO))
     {
         /* Receiving data through a pipe, and no file arguments. Act as if
          * invoked with "chafa -". */
@@ -2437,6 +2555,9 @@ chicle_parse_options (int *argc, char **argv [])
     if (options.optimization_level >= 7)
         options.optimizations |= CHAFA_OPTIMIZATION_SKIP_CELLS;
 
+    /* Any negative thread count -> auto */
+    if (options.n_threads < 0)
+        options.n_threads = -1;
     chafa_set_n_threads (options.n_threads);
 
     result = TRUE;

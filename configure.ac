@@ -141,7 +141,7 @@ AS_IF([test "$with_tools" != no], [
     ,
     with_heif=yes)
   AS_IF([test "$with_heif" != no], [
-    PKG_CHECK_MODULES(HEIF, [libheif],,
+    PKG_CHECK_MODULES(HEIF, [libheif >= 1.12.0],,
       missing_rpms="$missing_rpms libheif-devel"
       missing_debs="$missing_debs libheif-dev"
       with_heif=no)])
@@ -203,6 +203,28 @@ AS_IF([test "$with_tools" != no], [
       missing_debs="$missing_debs libjxl-dev"
       with_jxl=no)])
   AS_IF([test "$with_jxl" != no], [AC_DEFINE([HAVE_JXL], [1], [Define if we have JXL support.])])
+
+  dnl libdeflate (optional, speeds up the internal PNG loader)
+  AC_ARG_WITH(libdeflate,
+    [AS_HELP_STRING([--without-libdeflate], [don't use libdeflate to speed up PNG loading [default=on]])],
+    ,
+    with_libdeflate=yes)
+  AS_IF([test "$with_libdeflate" != no], [
+    PKG_CHECK_MODULES(LIBDEFLATE, [libdeflate],, [
+      dnl Releases before 1.9 are missing the pkg-config file. Let's check.
+      AC_CHECK_HEADER([libdeflate.h],
+        [AC_CHECK_LIB([deflate], [libdeflate_zlib_decompress],
+          [LIBDEFLATE_CFLAGS=""
+           LIBDEFLATE_LIBS="-ldeflate"],
+          [with_libdeflate=no])],
+        [with_libdeflate=no])
+      AS_IF([test "$with_libdeflate" = no], [
+        missing_rpms="$missing_rpms libdeflate-devel"
+        missing_debs="$missing_debs libdeflate-dev"])
+    ])])
+  AS_IF([test "$with_libdeflate" != no], [AC_DEFINE([HAVE_LIBDEFLATE], [1], [Define if we have libdeflate support.])])
+  AC_SUBST(LIBDEFLATE_CFLAGS)
+  AC_SUBST(LIBDEFLATE_LIBS)
 
   dnl coregraphics (auto, only macos)
   AC_ARG_WITH(coregraphics,
@@ -511,14 +533,7 @@ case "$host" in
     ;;
 esac
 
-dnl
-dnl We're not picky about floating point behavior, and this makes e.g.
-dnl lrintf() a lot faster.
-dnl
-AX_CHECK_COMPILE_FLAG([-ffast-math],
-    [BASE_CFLAGS="$BASE_CFLAGS -ffast-math"],
-    ,
-    [-Werror])
+AC_SUBST(CHAFA_VISIBILITY_CFLAGS)
 
 dnl --- Set compiler flags ---
 
@@ -595,6 +610,7 @@ colorize_vars="
   ac_cv_popcnt32_intrinsics
   ac_cv_popcnt64_intrinsics
   with_tools
+  with_libdeflate
   with_jpeg
   with_svg
   with_tiff
@@ -658,6 +674,7 @@ echo >&AS_MESSAGE_FD
 echo >&AS_MESSAGE_FD "Build command-line tool ..... $pwith_tools"
 
 if test "x$with_tools" != xno; then
+echo >&AS_MESSAGE_FD "With libdeflate ............. $pwith_libdeflate"
 echo >&AS_MESSAGE_FD "With AVIF loader ............ $pwith_avif"
 echo >&AS_MESSAGE_FD "With GIF loader ............. $pyes (internal)"
 echo >&AS_MESSAGE_FD "With HEIF loader ............ $pwith_heif"

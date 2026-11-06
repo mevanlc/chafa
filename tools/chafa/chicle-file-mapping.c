@@ -260,7 +260,7 @@ get_random_u64 (void)
         u64 ^= ((guint64) g_random_int ()) << 32;
 
         p = g_thread_self ();
-        u64 ^= (guint64) p;
+        u64 ^= (guint64) GPOINTER_TO_SIZE (p);
     }
 
     return u64;
@@ -468,22 +468,19 @@ map_or_read_file (ChicleFileMapping *file_mapping)
             goto out;
 
         t = fstat (file_mapping->fd, &sbuf);
-        if (sbuf.st_size > FILE_SIZE_MAX)
+        if (t || sbuf.st_size < 0 || sbuf.st_size > FILE_SIZE_MAX)
             goto out;
 
-        if (!t)
-        {
-            file_mapping->length = sbuf.st_size;
+        file_mapping->length = sbuf.st_size;
 #ifdef HAVE_MMAP
-            /* Try memory mapping first */
-            file_mapping->data = mmap (NULL,
-                                       file_mapping->length,
-                                       PROT_READ,
-                                       MAP_SHARED | MAP_NORESERVE,
-                                       file_mapping->fd,
-                                       0);
+        /* Try memory mapping first */
+        file_mapping->data = mmap (NULL,
+                                   file_mapping->length,
+                                   PROT_READ,
+                                   MAP_SHARED | MAP_NORESERVE,
+                                   file_mapping->fd,
+                                   0);
 #endif
-        }
 
         if (file_mapping->data != NULL
             && file_mapping->data != MAP_FAILED)

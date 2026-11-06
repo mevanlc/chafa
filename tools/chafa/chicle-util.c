@@ -18,10 +18,13 @@
  * along with Chafa.  If not, see <http://www.gnu.org/licenses/>. */
 
 #include "config.h"
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <unistd.h>  /* STDIN_FILENO */
+#include <fcntl.h>  /* fcntl */
 #include <chafa.h>
+
 #include "chicle-util.h"
 
 #define CHAR_BUF_SIZE 1024
@@ -173,6 +176,38 @@ chicle_rotate_image (gpointer *src, guint *width, guint *height, guint *rowstrid
     *rowstride = dest_rowstride;
 }
 
+/* Validates image dimensions supplied by a loader before anything is
+ * allocated for them. Rejects empty images, images wider or taller than
+ * CHICLE_IMAGE_EXTENT_PX_MAX, and pixel buffers that would overflow gsize
+ * or exceed max_size. On success, optionally returns the calculated
+ * buffer size in bytes. */
+gboolean
+chicle_calc_image_buffer_size (guint64 width, guint64 height, guint64 n_channels,
+                               guint64 max_size, gsize *size_out)
+{
+    guint64 size;
+
+    if (width < 1 || height < 1 || n_channels < 1)
+        return FALSE;
+    if (width > CHICLE_IMAGE_EXTENT_PX_MAX || height > CHICLE_IMAGE_EXTENT_PX_MAX)
+        return FALSE;
+    if (width > G_MAXSIZE / height)
+        return FALSE;
+
+    size = width * height;
+    if (size > G_MAXSIZE / n_channels)
+        return FALSE;
+
+    size *= n_channels;
+    if (size > max_size)
+        return FALSE;
+
+    if (size_out)
+        *size_out = (gsize) size;
+
+    return TRUE;
+}
+
 /* Replaces control characters (C0: U+0000..U+001F, U+007F; C1:
  * U+0080..U+009F) with '?' so attacker-controlled input cannot inject
  * terminal escape sequences when this string is later printed to a
@@ -254,11 +289,11 @@ chicle_ellipsize_string (const gchar *str, gint len_max, gboolean use_unicode)
 
     for (p = str, i = 0; *p && i < len_max; i++)
     {
-        p = g_utf8_next_char (p);
+        p = g_utf8_find_next_char (p, NULL);
     }
 
     j = p - str;
-    if (*p && !*g_utf8_next_char (p))
+    if (*p && !*g_utf8_find_next_char (p, NULL))
         return g_strdup (str);
 
     ellipsized = g_malloc (j + 7);
@@ -385,4 +420,85 @@ chicle_path_print_label (ChafaTerm *term, const gchar *path, ChafaAlign halign,
 
     g_free (label);
     g_free (sanitized_path);
+}
+
+gboolean
+chicle_stdin_is_open (void)
+{
+#ifdef G_OS_WIN32
+    return TRUE;
+#else
+    return fcntl (STDIN_FILENO, F_GETFD) >= 0;
+#endif
+}
+
+/* ---------------- *
+ * tmux interaction *
+ * ---------------- */
+
+/* Finds the socket of the tmux server we're running under. $TMUX is
+ * "socket_path,server_pid,session_id", and everything up to the first comma is
+ * the socket path.
+ *
+ * Returns NULL if we're not running inside tmux. Free with g_free(). */
+static gchar *
+get_tmux_socket_path (void)
+{
+    const gchar *tmux_env = g_getenv ("TMUX");
+
+    if (!tmux_env || *tmux_env == '\0' || *tmux_env == ',')
+        return NULL;
+
+    return g_strndup (tmux_env, strcspn (tmux_env, ","));
+}
+
+/* Runs a command against the tmux server we're running under. The tmux client
+ * inherits our environment, so the server can tell which pane we're in from
+ * $TMUX_PANE and resolve the current window, session and client accordingly.
+ *
+ * Does nothing and returns FALSE if we're not running inside tmux, or if
+ * the command failed. Otherwise returns TRUE and, if @standard_output_out is
+ * not NULL, stores the command's output there (free with g_free()). */
+gboolean
+chicle_run_tmux_cmd (gchar **standard_output_out, ...)
+{
+    GPtrArray *argv;
+    gchar *socket_path;
+    gchar *standard_output = NULL;
+    gint wait_status = -1;
+    gboolean result = FALSE;
+    const gchar *arg;
+    va_list args;
+
+    socket_path = get_tmux_socket_path ();
+    if (!socket_path)
+        return FALSE;
+
+    argv = g_ptr_array_new_with_free_func (g_free);
+    g_ptr_array_add (argv, g_strdup ("tmux"));
+    g_ptr_array_add (argv, g_strdup ("-S"));
+    g_ptr_array_add (argv, socket_path);
+
+    va_start (args, standard_output_out);
+    while ((arg = va_arg (args, const gchar *)))
+        g_ptr_array_add (argv, g_strdup (arg));
+    va_end (args);
+
+    g_ptr_array_add (argv, NULL);
+
+    if (g_spawn_sync (NULL, (gchar **) argv->pdata, NULL,
+                      G_SPAWN_SEARCH_PATH | G_SPAWN_STDERR_TO_DEV_NULL,
+                      NULL, NULL, &standard_output, NULL, &wait_status, NULL)
+        && g_spawn_check_exit_status (wait_status, NULL))
+    {
+        result = TRUE;
+    }
+
+    if (result && standard_output_out)
+        *standard_output_out = standard_output;
+    else
+        g_free (standard_output);
+
+    g_ptr_array_free (argv, TRUE);
+    return result;
 }
