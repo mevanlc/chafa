@@ -65,6 +65,19 @@ $ sudo make install
 
 That should do it!
 
+## Color values
+
+`--bg` and `--fg` accept X.Org color names, RGB hex values, and decimal
+xterm-256 palette indices from `0` to `255`. Indices use one to three digits,
+including any leading zeros:
+`--bg=1`, `--bg=01`, and `--bg=001` all select red (`#cc0403`).
+
+Indices `0`–`15` use fixed Kitty system colors, `16`–`231` use the standard
+xterm RGB cube, and `232`–`255` use its grayscale ramp. Indices are converted
+to RGB independently of the terminal's current palette. Six-digit RGB hex
+values accept an optional `#` or `0x` prefix: `--bg=112233`, `--bg='#112233'`,
+and `--bg=0x112233` all select the same RGB color.
+
 ## Python bindings
 
 [Erica Ferrua Edwardsdóttir](https://mage.black/) maintains

@@ -46,7 +46,6 @@ G_BEGIN_DECLS
 #include <glib/gstdio.h>
 
 #include <chafa.h>
-#include "chicle-named-colors.h"
 
 /* Include after glib.h for G_OS_WIN32 */
 #ifdef G_OS_WIN32

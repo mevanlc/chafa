@@ -374,9 +374,17 @@ until manually interrupted or, if --duration is set, until it expires.
 <varlistentry>
 <term><option>--bg <replaceable>color</replaceable></option></term>
 <listitem><para>
-Background color of display (color name or hex). Partially transparent input
-will be blended with this color. Color names are based on those provided with
-X.Org. Defaults to black, or the terminal's default background color when
+Background color of display (color name, hex, or xterm-256 palette index).
+Partially transparent input will be blended with this color. Color names are
+based on those provided with X.Org. Bare decimal numbers from 0 to 255 select
+palette entries. Indices use one to three digits, including any leading zeros,
+so 1, 01, and 001 all select red (#cc0403). Indices 0-15 use fixed
+Kitty system colors, 16-231 use the standard xterm 6x6x6 RGB cube, and 232-255
+use the grayscale ramp from #080808 to #eeeeee. These indices are resolved to
+RGB independently of the terminal's current palette. Six-digit RGB hex values
+accept an optional # or 0x prefix: 112233, #112233, and 0x112233 specify the
+same RGB color.
+Defaults to black, or the terminal's default background color when
 probing is enabled (see --probe).
 </para></listitem>
 </varlistentry>
@@ -455,9 +463,10 @@ useful results.
 <varlistentry>
 <term><option>--fg <replaceable>color</replaceable></option></term>
 <listitem><para>
-Foreground color of display (color name or hex). Together with the background
-color specified by --bg, this specifies the terminal's palette in color modes 2
-and none. Color names are based on those provided with X.Org. Defaults to
+Foreground color of display (color name, hex, or xterm-256 palette index).
+Accepts the same color formats and palette mappings as --bg. Together with the
+background color specified by --bg, this specifies the terminal's palette in
+color modes 2 and none. Color names are based on those provided with X.Org. Defaults to
 white, or the terminal's default foreground color when probing is enabled
 (see --probe).
 </para></listitem>

@@ -43,6 +43,7 @@
 
 #include <chafa.h>
 #include "chafa-term.h"
+#include "chicle-color.h"
 #include "chicle-font-loader.h"
 #include "chicle-grid-layout.h"
 #include "chicle-media-pipeline.h"
@@ -71,35 +72,6 @@ ChafaTerm *term;
 static gchar *tmux_allow_passthrough_original;
 static gboolean tmux_allow_passthrough_is_changed;
 
-static guchar
-get_hex_byte (const gchar *str)
-{
-    gint b = 0;
-
-    if (*str >= '0' && *str <= '9')
-        b = *str - '0';
-    else if (*str >= 'a' && *str <= 'f')
-        b = *str - 'a' + 10;
-    else if (*str >= 'A' && *str <= 'F')
-        b = *str - 'A' + 10;
-    else
-        g_assert_not_reached ();
-
-    b <<= 4;
-    str++;
-
-    if (*str >= '0' && *str <= '9')
-        b |= *str - '0';
-    else if (*str >= 'a' && *str <= 'f')
-        b |= *str - 'a' + 10;
-    else if (*str >= 'A' && *str <= 'F')
-        b |= *str - 'A' + 10;
-    else
-        g_assert_not_reached ();
-
-    return b;
-}
-
 static gint
 count_dash_strings (GList *l)
 {
@@ -112,49 +84,6 @@ count_dash_strings (GList *l)
     }
 
     return n;
-}
-
-static gboolean
-parse_color (const gchar *str, guint32 *col_out, GError **error)
-{
-    gint len;
-    gchar *label = NULL;
-    gchar *p0;
-    gboolean result = FALSE;
-
-    str += strspn (str, " \t");
-    len = strspn (str, "#abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
-    if (len < 1)
-    {
-        g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
-                     "Unrecognized color '%s'.", str);
-        goto out;
-    }
-
-    p0 = label = g_ascii_strdown (str, len);
-
-    /* Hex triplet, optionally prefixed with # or 0x */
-
-    if (*p0 == '#') p0++;
-    else if (p0 [0] == '0' && (p0 [1] == 'x')) p0 += 2;
-
-    len = strspn (p0, "0123456789abcdef");
-    if (len != (gint) strlen (p0) || len < 6)
-    {
-        g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
-                     "Unrecognized color '%s'.", str);
-        goto out;
-    }
-
-    if (len > 6) p0 += (len - 6);
-
-    *col_out = (get_hex_byte (p0) << 16) + (get_hex_byte (p0 + 2) << 8) + get_hex_byte (p0 + 4);
-
-    result = TRUE;
-
-out:
-    g_free (label);
-    return result;
 }
 
 static GList *
@@ -294,7 +223,9 @@ print_summary (void)
 
     "\nColors and processing:\n"
 
-    "      --bg=COLOR     Background color of display (color name or hex).\n"
+    "      --bg=COLOR     Background color (name, hex, or xterm index 0-255).\n"
+    "                     Indices use 1-3 digits, including any leading zeros.\n"
+    "                     Six-digit RGB hex accepts an optional # or 0x prefix.\n"
     "  -c, --colors=MODE  Set output color mode; one of [none, 2, 8, 16/8, 16, 240,\n"
     "                     256, full]. Defaults to best guess.\n"
     "      --color-extractor=EXTR  Method for extracting color from an area\n"
@@ -309,7 +240,7 @@ print_summary (void)
     "                     1x1 otherwise.\n"
     "      --dither-intensity=NUM  Multiplier for dither intensity [0.0 - inf].\n"
     "                     Defaults to 1.0.\n"
-    "      --fg=COLOR     Foreground color of display (color name or hex).\n"
+    "      --fg=COLOR     Foreground color (name, hex, or xterm index 0-255).\n"
     "      --invert       Swaps --fg and --bg. Useful with light terminal background.\n"
     "  -p, --preprocess=BOOL  Image preprocessing [on, off]. Defaults to on with 16\n"
     "                     colors or lower, off otherwise.\n"
@@ -1478,28 +1409,14 @@ out:
 static gboolean
 parse_color_str (const gchar *value, guint32 *col_out, const gchar *error_message, GError **error)
 {
-    const ChicleNamedColor *named_color;
-    guint32 col = 0x000000;
-    gboolean result = TRUE;
-
-    named_color = chicle_find_color_by_name (value);
-    if (named_color)
-    {
-        col = (named_color->color [0] << 16)
-            | (named_color->color [1] << 8)
-            | (named_color->color [2]);
-    }
-    else if (!parse_color (value, &col, NULL))
+    if (!chicle_parse_color (value, col_out))
     {
         g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
                      error_message, value);
-        result = FALSE;
+        return FALSE;
     }
 
-    if (result)
-        *col_out = col;
-
-    return result;
+    return TRUE;
 }
 
 static gboolean

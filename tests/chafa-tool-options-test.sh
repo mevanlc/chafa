@@ -3,6 +3,18 @@
 [ "x${srcdir}" = "x" ] && srcdir="."
 . "${srcdir}/chafa-tool-test-common.sh"
 
+for option in --bg --fg; do
+    for color in 0 1 01 001 15 16 231 232 255 000001 000255 112233; do
+        "$tool" "$option=$color" --version >/dev/null || exit $?
+    done
+    for color in 256 999 0256 0001 00001; do
+        if "$tool" "$option=$color" --version >/dev/null 2>&1; then
+            echo "Unexpectedly accepted $option=$color" >&2
+            exit 1
+        fi
+    done
+done
+
 color_spaces="rgb din99d"
 color_extractors="average median"
 dither_types="none ordered diffusion"

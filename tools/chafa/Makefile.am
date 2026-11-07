@@ -5,6 +5,8 @@ bin_PROGRAMS = \
 
 chafa_SOURCES = \
 	chafa.c \
+	chicle-color.c \
+	chicle-color.h \
 	chicle-file-mapping.c \
 	chicle-file-mapping.h \
 	chicle-font-loader.c \
