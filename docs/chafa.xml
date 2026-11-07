@@ -473,6 +473,38 @@ white, or the terminal's default foreground color when probing is enabled
 </varlistentry>
 
 <varlistentry>
+<term><option>--force-color-fg <replaceable>colors</replaceable></option></term>
+<term><option>--force-color-bg <replaceable>colors</replaceable></option></term>
+<listitem><para>
+Restrict foreground or background output colors independently. Accepts a
+comma-separated list of colors in the same formats as --fg/--bg, with inclusive
+palette-index ranges such as 1,4-7,232-255. Indices and range endpoints use one
+to three decimal digits, including leading zeros. Empty items, descending
+ranges, and unavailable colors are errors. Glyph selection uses the restricted
+palettes; nearest-color matching uses the effective color space. Equal-distance
+matches follow list order; repeating an option replaces its list.
+</para><para>
+An explicitly specified --fg or --bg adds its color to the matching restricted
+palette as the terminal-default foreground or background. Matching it selects
+the default color (SGR 39 or 49), retaining the glyph. Implicit and probed
+defaults are not added. An equivalent existing palette entry becomes a default
+entry. The terminal's palette and default color settings are not modified.
+</para><para>
+All specified colors, including added defaults, must exist in the effective
+color mode. Numeric indices select exact terminal slots. Names and hex values
+must exactly match an available Kitty/xterm palette RGB. Modes 8 and 16 allow
+slots 0-7 and 0-15 respectively; 16/8 allows foreground 0-15 and background
+0-7; 240 allows 16-255; 256 allows 0-255. Truecolor accepts any RGB color.
+For example, red (#ff0000) is slot 196, while system slot 1 is #cc0403.
+</para><para>
+These options select symbol output when the format is automatic. Explicit
+pixel formats and color modes none/2 are unsupported. --force-color-bg cannot
+be combined with --fg-only. --invert swaps the default colors, while force
+lists continue to target their named channels.
+</para></listitem>
+</varlistentry>
+
+<varlistentry>
 <term><option>--invert</option></term>
 <listitem><para>
 Invert video. For display with bright backgrounds in color modes 2 and

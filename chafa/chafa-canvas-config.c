@@ -85,6 +85,8 @@ chafa_canvas_config_deinit (ChafaCanvasConfig *canvas_config)
 
     chafa_symbol_map_deinit (&canvas_config->symbol_map);
     chafa_symbol_map_deinit (&canvas_config->fill_symbol_map);
+    if (canvas_config->fg_color_palette) g_array_unref (canvas_config->fg_color_palette);
+    if (canvas_config->bg_color_palette) g_array_unref (canvas_config->bg_color_palette);
 }
 
 void
@@ -97,6 +99,61 @@ chafa_canvas_config_copy_contents (ChafaCanvasConfig *dest, const ChafaCanvasCon
     chafa_symbol_map_copy_contents (&dest->symbol_map, &src->symbol_map);
     chafa_symbol_map_copy_contents (&dest->fill_symbol_map, &src->fill_symbol_map);
     dest->refs = 1;
+    if (src->fg_color_palette) dest->fg_color_palette = g_array_ref (src->fg_color_palette);
+    if (src->bg_color_palette) dest->bg_color_palette = g_array_ref (src->bg_color_palette);
+}
+
+static void
+set_color_palette (GArray **dest, const ChafaColorPaletteEntry *entries, guint n_entries)
+{
+    GArray *copy = NULL;
+    guint i;
+
+    g_return_if_fail (n_entries == 0 || entries != NULL);
+    for (i = 0; i < n_entries; i++)
+    {
+        g_return_if_fail (entries [i].rgb <= 0xffffff);
+        g_return_if_fail (entries [i].output >= CHAFA_COLOR_OUTPUT_RGB
+                          && entries [i].output <= CHAFA_COLOR_OUTPUT_DEFAULT);
+        g_return_if_fail (entries [i].output != CHAFA_COLOR_OUTPUT_INDEXED || entries [i].index < 256);
+    }
+    if (n_entries)
+    {
+        copy = g_array_sized_new (FALSE, FALSE, sizeof (*entries), n_entries);
+        g_array_append_vals (copy, entries, n_entries);
+    }
+    if (*dest) g_array_unref (*dest);
+    *dest = copy;
+}
+
+void
+chafa_canvas_config_set_fg_color_palette (ChafaCanvasConfig *config, const ChafaColorPaletteEntry *entries, guint n_entries)
+{
+    g_return_if_fail (config != NULL);
+    set_color_palette (&config->fg_color_palette, entries, n_entries);
+}
+
+void
+chafa_canvas_config_set_bg_color_palette (ChafaCanvasConfig *config, const ChafaColorPaletteEntry *entries, guint n_entries)
+{
+    g_return_if_fail (config != NULL);
+    set_color_palette (&config->bg_color_palette, entries, n_entries);
+}
+
+const ChafaColorPaletteEntry *
+chafa_canvas_config_get_fg_color_palette (const ChafaCanvasConfig *config, guint *n_entries)
+{
+    g_return_val_if_fail (config != NULL, NULL);
+    if (n_entries) *n_entries = config->fg_color_palette ? config->fg_color_palette->len : 0;
+    return config->fg_color_palette ? (const ChafaColorPaletteEntry *) config->fg_color_palette->data : NULL;
+}
+
+const ChafaColorPaletteEntry *
+chafa_canvas_config_get_bg_color_palette (const ChafaCanvasConfig *config, guint *n_entries)
+{
+    g_return_val_if_fail (config != NULL, NULL);
+    if (n_entries) *n_entries = config->bg_color_palette ? config->bg_color_palette->len : 0;
+    return config->bg_color_palette ? (const ChafaColorPaletteEntry *) config->bg_color_palette->data : NULL;
 }
 
 /* Public */

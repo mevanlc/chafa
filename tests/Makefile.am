@@ -21,6 +21,7 @@ check_PROGRAMS = \
 	color-hash-test \
 	color-test \
 	tool-color-test \
+	force-color-test \
 	loader-arithmetic-test \
 	palette-test \
 	stream-reader-test \
@@ -40,6 +41,11 @@ color_test_SOURCES = \
 
 tool_color_test_SOURCES = \
 	tool-color-test.c \
+	$(top_srcdir)/tools/chafa/chicle-color.c \
+	$(top_srcdir)/tools/chafa/chicle-named-colors.c
+
+force_color_test_SOURCES = \
+	force-color-test.c \
 	$(top_srcdir)/tools/chafa/chicle-color.c \
 	$(top_srcdir)/tools/chafa/chicle-named-colors.c
 
@@ -79,6 +85,7 @@ TESTS = \
 	color-hash-test \
 	color-test \
 	tool-color-test \
+	force-color-test \
 	loader-arithmetic-test \
 	palette-test \
 	stream-reader-test \

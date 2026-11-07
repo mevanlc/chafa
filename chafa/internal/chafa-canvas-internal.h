@@ -24,6 +24,7 @@
 #include "chafa.h"
 #include "internal/chafa-private.h"
 #include "internal/chafa-pixops.h"
+#include "internal/chafa-color-map.h"
 
 G_BEGIN_DECLS
 
@@ -34,6 +35,8 @@ struct ChafaCanvasCell
     /* Colors can be either packed RGBA or index */
     guint32 fg_color;
     guint32 bg_color;
+    guint fg_default : 1;
+    guint bg_default : 1;
 };
 
 struct ChafaCanvas
@@ -85,6 +88,8 @@ struct ChafaCanvas
     /* Our palettes. Kind of a big structure, so they go last. */
     ChafaPalette fg_palette;
     ChafaPalette bg_palette;
+    ChafaColorMap fg_color_map;
+    ChafaColorMap bg_color_map;
 };
 
 G_END_DECLS

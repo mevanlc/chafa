@@ -32,6 +32,40 @@ G_BEGIN_DECLS
 
 typedef struct ChafaCanvasConfig ChafaCanvasConfig;
 
+/* A restricted output palette. RGB is always the nominal 0xRRGGBB value;
+ * indexed entries also identify the exact terminal slot. DEFAULT selects
+ * the terminal default for the channel to which the palette is assigned. */
+typedef enum
+{
+    CHAFA_COLOR_OUTPUT_RGB,
+    CHAFA_COLOR_OUTPUT_INDEXED,
+    CHAFA_COLOR_OUTPUT_DEFAULT
+}
+ChafaColorOutput;
+
+typedef struct
+{
+    guint32 rgb;
+    ChafaColorOutput output;
+    guint index;
+}
+ChafaColorPaletteEntry;
+
+/* Setters copy entries. Zero entries clears the restriction. Getter results
+ * are borrowed until the config is modified or freed. Image rendering uses
+ * these palettes in symbol mode, as do RGB cell setters. Raw cell setters
+ * remain raw. RGB mode requires RGB/default entries; indexed modes require
+ * indexed/default entries with a legal channel index. Unsupported palette,
+ * pixel-mode, or foreground-only combinations make canvas creation fail. */
+CHAFA_AVAILABLE_IN_ALL
+void chafa_canvas_config_set_fg_color_palette (ChafaCanvasConfig *config, const ChafaColorPaletteEntry *entries, guint n_entries);
+CHAFA_AVAILABLE_IN_ALL
+void chafa_canvas_config_set_bg_color_palette (ChafaCanvasConfig *config, const ChafaColorPaletteEntry *entries, guint n_entries);
+CHAFA_AVAILABLE_IN_ALL
+const ChafaColorPaletteEntry *chafa_canvas_config_get_fg_color_palette (const ChafaCanvasConfig *config, guint *n_entries);
+CHAFA_AVAILABLE_IN_ALL
+const ChafaColorPaletteEntry *chafa_canvas_config_get_bg_color_palette (const ChafaCanvasConfig *config, guint *n_entries);
+
 CHAFA_AVAILABLE_IN_ALL
 ChafaCanvasConfig *chafa_canvas_config_new (void);
 CHAFA_AVAILABLE_IN_ALL

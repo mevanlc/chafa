@@ -545,6 +545,10 @@ build_config (gint dest_width, gint dest_height, gboolean is_animation)
     chafa_canvas_config_set_color_space (config, options.color_space);
     chafa_canvas_config_set_fg_color (config, options.fg_color);
     chafa_canvas_config_set_bg_color (config, options.bg_color);
+    if (options.force_color_fg)
+        chafa_canvas_config_set_fg_color_palette (config, (const ChafaColorPaletteEntry *) options.force_color_fg->data, options.force_color_fg->len);
+    if (options.force_color_bg)
+        chafa_canvas_config_set_bg_color_palette (config, (const ChafaColorPaletteEntry *) options.force_color_bg->data, options.force_color_bg->len);
     chafa_canvas_config_set_preprocessing_enabled (config, options.preprocess);
     chafa_canvas_config_set_fg_only_enabled (config, options.fg_only);
     chafa_canvas_config_set_passthrough (config, options.passthrough);

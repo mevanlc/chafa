@@ -144,6 +144,12 @@ typedef struct
     gboolean fg_color_set;
     guint32 bg_color;
     gboolean bg_color_set;
+    gchar *fg_color_arg;
+    gchar *bg_color_arg;
+    gchar *force_color_fg_arg;
+    gchar *force_color_bg_arg;
+    GArray *force_color_fg;
+    GArray *force_color_bg;
     gdouble transparency_threshold;
     gboolean transparency_threshold_set;
     gdouble file_duration_s;

@@ -241,6 +241,12 @@ print_summary (void)
     "      --dither-intensity=NUM  Multiplier for dither intensity [0.0 - inf].\n"
     "                     Defaults to 1.0.\n"
     "      --fg=COLOR     Foreground color (name, hex, or xterm index 0-255).\n"
+    "      --force-color-fg=COLORS  Restrict foreground output to these colors.\n"
+    "      --force-color-bg=COLORS  Restrict background output to these colors.\n"
+    "                     Comma-separated colors or inclusive index ranges (0-255),\n"
+    "                     e.g. 1,4-7,232-255. Requires symbols and color mode 8+.\n"
+    "                     Explicit --fg/--bg adds that channel's terminal-default\n"
+    "                     color. All colors must exist in the effective color mode.\n"
     "      --invert       Swaps --fg and --bg. Useful with light terminal background.\n"
     "  -p, --preprocess=BOOL  Image preprocessing [on, off]. Defaults to on with 16\n"
     "                     colors or lower, off otherwise.\n"
@@ -1420,9 +1426,20 @@ parse_color_str (const gchar *value, guint32 *col_out, const gchar *error_messag
 }
 
 static gboolean
+parse_force_color_arg (const gchar *option_name, const gchar *value, G_GNUC_UNUSED gpointer data, G_GNUC_UNUSED GError **error)
+{
+    gchar **dest = !strcmp (option_name, "--force-color-fg") ? &options.force_color_fg_arg : &options.force_color_bg_arg;
+    g_free (*dest);
+    *dest = g_strdup (value);
+    return TRUE;
+}
+
+static gboolean
 parse_fg_color_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GNUC_UNUSED gpointer data, GError **error)
 {
     options.fg_color_set = parse_color_str (value, &options.fg_color, "Unrecognized foreground color '%s'.", error);
+    g_free (options.fg_color_arg);
+    options.fg_color_arg = g_strdup (value);
     return options.fg_color_set;
 }
 
@@ -1430,6 +1447,8 @@ static gboolean
 parse_bg_color_arg (G_GNUC_UNUSED const gchar *option_name, const gchar *value, G_GNUC_UNUSED gpointer data, GError **error)
 {
     options.bg_color_set = parse_color_str (value, &options.bg_color, "Unrecognized background color '%s'.", error);
+    g_free (options.bg_color_arg);
+    options.bg_color_arg = g_strdup (value);
     return options.bg_color_set;
 }
 
@@ -1870,6 +1889,8 @@ chicle_parse_options (int *argc, char **argv [])
         { "duration",    'd',  0, G_OPTION_ARG_CALLBACK, parse_duration_arg,    "Duration", NULL },
         { "exact-size",  '\0', 0, G_OPTION_ARG_CALLBACK, parse_exact_size_arg,  "Whether to prefer the original image size", NULL },
         { "fg",          '\0', 0, G_OPTION_ARG_CALLBACK, parse_fg_color_arg,    "Foreground color of display", NULL },
+        { "force-color-fg", '\0', 0, G_OPTION_ARG_CALLBACK, parse_force_color_arg, "Restrict foreground output colors", "COLORS" },
+        { "force-color-bg", '\0', 0, G_OPTION_ARG_CALLBACK, parse_force_color_arg, "Restrict background output colors", "COLORS" },
         { "fg-only",     '\0', 0, G_OPTION_ARG_NONE,     &options.fg_only,      "Foreground only", NULL },
         { "files",       '\0', 0, G_OPTION_ARG_CALLBACK, parse_files_arg,       "File list", NULL },
         { "files0",      '\0', 0, G_OPTION_ARG_CALLBACK, parse_files0_arg,      "File list (NUL-separated)", NULL },
@@ -2092,6 +2113,17 @@ chicle_parse_options (int *argc, char **argv [])
             chafa_term_destroy (ctty_term);
     }
 
+    if (options.force_color_fg_arg || options.force_color_bg_arg)
+    {
+        if (options.pixel_mode_set && options.pixel_mode != CHAFA_PIXEL_MODE_SYMBOLS)
+        {
+            g_printerr ("%s: --force-color-fg/--force-color-bg require symbol output.\n", options.executable_name);
+            goto out;
+        }
+        options.pixel_mode = CHAFA_PIXEL_MODE_SYMBOLS;
+    }
+
+
     /* tmux answers DA1 with sixel capability on its own behalf, whether or not
      * the terminal it's attached to can display sixels. Ask if the outer
      * terminal can do sixels, and turn it off if the answer is a definite no. */
@@ -2243,6 +2275,7 @@ chicle_parse_options (int *argc, char **argv [])
     }
 
     /* Now we've established the pixel mode, apply dependent defaults */
+
 
     if (options.pixel_mode == CHAFA_PIXEL_MODE_SYMBOLS)
     {
@@ -2425,10 +2458,39 @@ chicle_parse_options (int *argc, char **argv [])
     if (options.invert)
     {
         guint32 temp_color;
+        gchar *temp_arg = options.fg_color_arg;
+        gboolean temp_set = options.fg_color_set;
 
         temp_color = options.bg_color;
         options.bg_color = options.fg_color;
         options.fg_color = temp_color;
+        options.fg_color_set = options.bg_color_set;
+        options.bg_color_set = temp_set;
+        options.fg_color_arg = options.bg_color_arg;
+        options.bg_color_arg = temp_arg;
+    }
+
+    if (options.force_color_fg_arg || options.force_color_bg_arg)
+    {
+        GError *color_error = NULL;
+        if (options.mode == CHAFA_CANVAS_MODE_FGBG || options.mode == CHAFA_CANVAS_MODE_FGBG_BGFG
+            || (options.fg_only && options.force_color_bg_arg))
+        {
+            g_printerr ("%s: Force-color options require color mode 8 or higher; --force-color-bg cannot be combined with --fg-only.\n", options.executable_name);
+            goto out;
+        }
+        if (options.force_color_fg_arg)
+            options.force_color_fg = chicle_parse_color_list (options.force_color_fg_arg, options.mode, TRUE,
+                                                              options.fg_color_arg, &color_error);
+        if (!color_error && options.force_color_bg_arg)
+            options.force_color_bg = chicle_parse_color_list (options.force_color_bg_arg, options.mode, FALSE,
+                                                              options.bg_color_arg, &color_error);
+        if (color_error)
+        {
+            g_printerr ("%s: %s\n", options.executable_name, color_error->message);
+            g_error_free (color_error);
+            goto out;
+        }
     }
 
     if (options.file_duration_s < 0.0

@@ -2889,5 +2889,16 @@ CHAFA_TERM_SEQ_DEF(begin_hyperlink_anchor, BEGIN_HYPERLINK_ANCHOR, 0, none, char
  **/
 CHAFA_TERM_SEQ_DEF(end_hyperlink, END_HYPERLINK, 0, none, char, (CHAFA_TERM_SEQ_PFX))
 
+/**
+ * chafa_term_info_emit_disable_bold:
+ * @term_info: A #ChafaTermInfo
+ * @dest: String destination
+ *
+ * Selects normal intensity without changing either color channel.
+ * @dest must have CHAFA_TERM_SEQ_LENGTH_MAX bytes available.
+ * Returns: Pointer to first byte after emitted string
+ **/
+CHAFA_TERM_SEQ_DEF(disable_bold, DISABLE_BOLD, 0, none, char, (CHAFA_TERM_SEQ_PFX))
+
 #undef CHAFA_TERM_SEQ_AVAILABILITY
 #undef CHAFA_TERM_SEQ_PFX

@@ -15,6 +15,8 @@ libchafa_internal_sources = \
 	chafa-canvas-printer.h \
 	chafa-color.c \
 	chafa-color.h \
+	chafa-color-map.c \
+	chafa-color-map.h \
 	chafa-color-hash.c \
 	chafa-color-hash.h \
 	chafa-color-table.c \

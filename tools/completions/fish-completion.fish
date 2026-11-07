@@ -55,3 +55,6 @@ complete -c chafa -l 'fg-only'       -d 'Leave the background color untouched'
 complete -c chafa -l 'fill'       -x -d 'Specify character symbols to use for fill/gradients'
 complete -c chafa -l 'glyph-file' -r -d 'Load glyph information from FILE'
 complete -c chafa -l 'symbols'    -x -d 'Specify character symbols to employ in final output'
+
+complete -c chafa -l 'force-color-fg' -x -d 'Restrict foreground palette; colors and inclusive index ranges'
+complete -c chafa -l 'force-color-bg' -x -d 'Restrict background palette; colors and inclusive index ranges'

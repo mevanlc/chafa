@@ -496,6 +496,41 @@ draw_all_pixels (ChafaCanvas *canvas, ChafaPixelType src_pixel_type,
     }
 }
 
+static gboolean
+color_palettes_valid (const ChafaCanvasConfig *config)
+{
+    guint channel, i;
+    for (channel = 0; channel < 2; channel++)
+    {
+        const GArray *entries = channel ? config->bg_color_palette : config->fg_color_palette;
+        guint first = 0, last = 255;
+        if (!entries) continue;
+        if (config->pixel_mode != CHAFA_PIXEL_MODE_SYMBOLS) return FALSE;
+        switch (config->canvas_mode)
+        {
+            case CHAFA_CANVAS_MODE_TRUECOLOR: break;
+            case CHAFA_CANVAS_MODE_INDEXED_256: break;
+            case CHAFA_CANVAS_MODE_INDEXED_240: first = 16; break;
+            case CHAFA_CANVAS_MODE_INDEXED_16: last = 15; break;
+            case CHAFA_CANVAS_MODE_INDEXED_16_8: last = channel ? 7 : 15; break;
+            case CHAFA_CANVAS_MODE_INDEXED_8: last = 7; break;
+            default: return FALSE;
+        }
+        if (channel && config->fg_only_enabled) return FALSE;
+        for (i = 0; i < entries->len; i++)
+        {
+            const ChafaColorPaletteEntry *entry = &g_array_index (entries, ChafaColorPaletteEntry, i);
+            if (config->canvas_mode == CHAFA_CANVAS_MODE_TRUECOLOR)
+            {
+                if (entry->output == CHAFA_COLOR_OUTPUT_INDEXED) return FALSE;
+            }
+            else if (entry->output == CHAFA_COLOR_OUTPUT_RGB || entry->index < first || entry->index > last)
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 /**
  * chafa_canvas_new:
  * @config: Configuration to use or %NULL for hardcoded defaults
@@ -516,6 +551,7 @@ chafa_canvas_new (const ChafaCanvasConfig *config)
     {
         g_return_val_if_fail (config->width > 0, NULL);
         g_return_val_if_fail (config->height > 0, NULL);
+        g_return_val_if_fail (color_palettes_valid (config), NULL);
     }
 
     chafa_init ();
@@ -622,6 +658,26 @@ chafa_canvas_new (const ChafaCanvasConfig *config)
 
     update_display_colors (canvas);
     setup_palette (canvas);
+    chafa_color_map_init (&canvas->fg_color_map, canvas->config.fg_color_palette, canvas->config.color_space);
+    chafa_color_map_init (&canvas->bg_color_map, canvas->config.bg_color_palette, canvas->config.color_space);
+    if (canvas->config.canvas_mode != CHAFA_CANVAS_MODE_TRUECOLOR)
+    {
+        guint channel, i;
+        for (channel = 0; channel < 2; channel++)
+        {
+            const GArray *entries = channel ? canvas->config.bg_color_palette : canvas->config.fg_color_palette;
+            ChafaPalette *palette = channel ? &canvas->bg_palette : &canvas->fg_palette;
+            if (!entries) continue;
+            for (i = 0; i < entries->len; i++)
+            {
+                const ChafaColorPaletteEntry *entry = &g_array_index (entries, ChafaColorPaletteEntry, i);
+                ChafaColor rgb;
+                chafa_unpack_color (entry->rgb, &rgb);
+                rgb.ch [3] = 255;
+                chafa_palette_set_color (palette, entry->index, &rgb);
+            }
+        }
+    }
 
     return canvas;
 }
@@ -702,6 +758,8 @@ chafa_canvas_unref (ChafaCanvas *canvas)
         chafa_dither_deinit (&canvas->dither);
         chafa_palette_deinit (&canvas->fg_palette);
         chafa_palette_deinit (&canvas->bg_palette);
+        chafa_color_map_deinit (&canvas->fg_color_map);
+        chafa_color_map_deinit (&canvas->bg_color_map);
         g_free (canvas->pixels);
         g_free (canvas->cells);
         g_free (canvas);
@@ -1197,6 +1255,8 @@ chafa_canvas_set_char_at (ChafaCanvas *canvas, gint x, gint y, gunichar c)
         cell [1].c = 0;
         cell [1].fg_color = cell [0].fg_color;
         cell [1].bg_color = cell [0].bg_color;
+        cell [1].fg_default = cell [0].fg_default;
+        cell [1].bg_default = cell [0].bg_default;
     }
 
     /* If we're overwriting the rightmost half of a wide character,
@@ -1282,6 +1342,31 @@ chafa_canvas_get_colors_at (ChafaCanvas *canvas, gint x, gint y,
     *bg_out = bg;
 }
 
+/* Apply the same restriction when callers set an RGB cell color directly. */
+static void
+map_cell_color (ChafaCanvas *canvas, const ChafaColorMap *map, gint rgb,
+                guint32 *encoded, gboolean *is_default)
+{
+    ChafaColor color;
+    guint best;
+    const ChafaColorPaletteEntry *entry;
+    *is_default = FALSE;
+    if (!map->entries || rgb < 0) return;
+    chafa_unpack_color ((guint32) rgb, &color);
+    color.ch [3] = 255;
+    if (canvas->config.color_space == CHAFA_COLOR_SPACE_DIN99D)
+    {
+        ChafaColor converted;
+        chafa_color_rgb_to_din99d (&color, &converted);
+        color = converted;
+    }
+    best = chafa_color_map_find_nearest (map, &color);
+    entry = &g_array_index (map->entries, ChafaColorPaletteEntry, best);
+    *encoded = canvas->config.canvas_mode == CHAFA_CANVAS_MODE_TRUECOLOR
+        ? entry->rgb | 0xff000000 : entry->index;
+    *is_default = entry->output == CHAFA_COLOR_OUTPUT_DEFAULT;
+}
+
 /**
  * chafa_canvas_set_colors_at:
  * @canvas: The canvas to manipulate
@@ -1314,6 +1399,8 @@ chafa_canvas_set_colors_at (ChafaCanvas *canvas, gint x, gint y,
 
     cell = &canvas->cells [(gsize) y * (gsize) canvas->config.width + x];
 
+    cell->fg_default = cell->bg_default = FALSE;
+
     switch (canvas->config.canvas_mode)
     {
         case CHAFA_CANVAS_MODE_TRUECOLOR:
@@ -1340,18 +1427,30 @@ chafa_canvas_set_colors_at (ChafaCanvas *canvas, gint x, gint y,
             break;
     }
 
+    {
+        gboolean fg_default, bg_default;
+        map_cell_color (canvas, &canvas->fg_color_map, fg, &cell->fg_color, &fg_default);
+        map_cell_color (canvas, &canvas->bg_color_map, bg, &cell->bg_color, &bg_default);
+        cell->fg_default = fg_default;
+        cell->bg_default = bg_default;
+    }
+
     /* If setting the color of half a wide char, set it for the other half too */
 
     if (x > 0 && cell->c == 0)
     {
         cell [-1].fg_color = cell->fg_color;
         cell [-1].bg_color = cell->bg_color;
+        cell [-1].fg_default = cell->fg_default;
+        cell [-1].bg_default = cell->bg_default;
     }
 
     if (x < canvas->config.width - 1 && cell [1].c == 0)
     {
         cell [1].fg_color = cell->fg_color;
         cell [1].bg_color = cell->bg_color;
+        cell [1].fg_default = cell->fg_default;
+        cell [1].bg_default = cell->bg_default;
     }
 }
 
@@ -1455,6 +1554,8 @@ chafa_canvas_set_raw_colors_at (ChafaCanvas *canvas, gint x, gint y,
 
     cell = &canvas->cells [(gsize) y * (gsize) canvas->config.width + x];
 
+    cell->fg_default = cell->bg_default = FALSE;
+
     switch (canvas->config.canvas_mode)
     {
         case CHAFA_CANVAS_MODE_TRUECOLOR:
@@ -1487,11 +1588,13 @@ chafa_canvas_set_raw_colors_at (ChafaCanvas *canvas, gint x, gint y,
     {
         cell [-1].fg_color = cell->fg_color;
         cell [-1].bg_color = cell->bg_color;
+        cell [-1].fg_default = cell [-1].bg_default = FALSE;
     }
 
     if (x < canvas->config.width - 1 && cell [1].c == 0)
     {
         cell [1].fg_color = cell->fg_color;
         cell [1].bg_color = cell->bg_color;
+        cell [1].fg_default = cell [1].bg_default = FALSE;
     }
 }

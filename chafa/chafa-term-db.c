@@ -404,6 +404,8 @@ static const SeqStr color_8_seqs [] =
     { CHAFA_TERM_SEQ_SET_COLOR_BG_8, "\033[%1m" },
     { CHAFA_TERM_SEQ_SET_COLOR_FGBG_8, "\033[%1;%2m" },
 
+    { CHAFA_TERM_SEQ_DISABLE_BOLD, "\033[22m" },
+
     /* ECMA-48 3rd ed. March 1984 */
     { CHAFA_TERM_SEQ_RESET_COLOR_FG, "\033[39m" },
     { CHAFA_TERM_SEQ_RESET_COLOR_BG, "\033[49m" },
@@ -556,6 +558,7 @@ static const ChafaTermSeq lf_inherit_seqs [] =
     CHAFA_TERM_SEQ_RESET_COLOR_FG,
     CHAFA_TERM_SEQ_RESET_COLOR_BG,
     CHAFA_TERM_SEQ_RESET_COLOR_FGBG,
+    CHAFA_TERM_SEQ_DISABLE_BOLD,
 
     CHAFA_TERM_SEQ_BEGIN_SIXELS,
     CHAFA_TERM_SEQ_END_SIXELS,

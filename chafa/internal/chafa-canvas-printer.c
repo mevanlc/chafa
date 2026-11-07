@@ -31,6 +31,8 @@ typedef struct
     gint n_reps;
     guint cur_inverted : 1;
     guint cur_bold : 1;
+    guint cur_fg_default : 1;
+    guint cur_bg_default : 1;
     guint32 cur_fg;
     guint32 cur_bg;
 
@@ -126,6 +128,7 @@ reset_attributes (PrintCtx *ctx, gchar *out)
 {
     out = chafa_term_info_emit_reset_attributes (ctx->term_info, out);
 
+    ctx->cur_fg_default = ctx->cur_bg_default = FALSE;
     ctx->cur_inverted = FALSE;
     ctx->cur_bold = FALSE;
     ctx->cur_fg = CHAFA_PALETTE_INDEX_TRANSPARENT;
@@ -668,6 +671,99 @@ prealloc_string (GString *gs, gint n_cells)
     }
 }
 
+/* Restricted palettes carry terminal-default markers independently of alpha.
+ * Keep this encoder separate from legacy reverse-video transparency paths. */
+G_GNUC_WARN_UNUSED_RESULT static gchar *
+emit_ansi_mapped (PrintCtx *ctx, gchar *out, gsize i, gsize end)
+{
+    ChafaCanvas *canvas = ctx->canvas;
+    gboolean direct = canvas->config.canvas_mode == CHAFA_CANVAS_MODE_TRUECOLOR;
+    gboolean reuse = canvas->config.optimizations & CHAFA_OPTIMIZATION_REUSE_ATTRIBUTES;
+
+    for (; i < end; i++)
+    {
+        const ChafaCanvasCell *cell = &canvas->cells [i];
+        guint32 colors [2] = { cell->fg_color, cell->bg_color };
+        gboolean defaults [2] = { cell->fg_default, cell->bg_default };
+        gboolean transparent [2];
+        gboolean inverted, bold;
+        guint channel;
+
+        if (!cell->c) continue;
+        for (channel = 0; channel < 2; channel++)
+            transparent [channel] = direct
+                ? (colors [channel] >> 24) < (guint) canvas->config.alpha_threshold
+                : colors [channel] == CHAFA_PALETTE_INDEX_TRANSPARENT;
+        inverted = transparent [0] && !transparent [1] && !defaults [1];
+        if (inverted)
+        {
+            guint32 swap = colors [0]; colors [0] = colors [1]; colors [1] = swap;
+            transparent [0] = FALSE; transparent [1] = TRUE;
+        }
+        out = flush_chars (ctx, out);
+        if (ctx->cur_inverted != inverted || (!reuse && !canvas->config.fg_only_enabled))
+            out = reset_attributes (ctx, out);
+        if (inverted && !ctx->cur_inverted)
+            out = chafa_term_info_emit_invert_colors (ctx->term_info, out);
+        ctx->cur_inverted = inverted;
+
+        bold = canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_16_8
+            && !defaults [0] && !transparent [0] && colors [0] >= 8 && colors [0] < 16;
+        if (bold && !ctx->cur_bold)
+            out = chafa_term_info_emit_enable_bold (ctx->term_info, out);
+        if (!bold && ctx->cur_bold)
+            out = chafa_term_info_emit_disable_bold (ctx->term_info, out);
+        ctx->cur_bold = bold;
+
+        for (channel = 0; channel < 2; channel++)
+        {
+            guint32 *current = channel ? &ctx->cur_bg : &ctx->cur_fg;
+            gboolean old_default = channel ? ctx->cur_bg_default : ctx->cur_fg_default;
+            ChafaColor *current_direct = channel ? &ctx->cur_bg_direct : &ctx->cur_fg_direct;
+            gboolean reset = defaults [channel] || transparent [channel];
+            ChafaColor color;
+            gboolean changed;
+
+            if (channel && canvas->config.fg_only_enabled) continue;
+            chafa_unpack_color (colors [channel], &color);
+            if (reset) color.ch [3] = 0;
+            changed = !reuse || old_default != defaults [channel]
+                || (direct ? cmp_colors (color, *current_direct)
+                           : *current != (reset ? CHAFA_PALETTE_INDEX_TRANSPARENT : colors [channel]));
+            if (changed)
+            {
+                if (reset)
+                    out = channel ? chafa_term_info_emit_reset_color_bg (ctx->term_info, out)
+                                  : chafa_term_info_emit_reset_color_fg (ctx->term_info, out);
+                else if (direct)
+                    out = channel ? chafa_term_info_emit_set_color_bg_direct (ctx->term_info, out, color.ch [0], color.ch [1], color.ch [2])
+                                  : chafa_term_info_emit_set_color_fg_direct (ctx->term_info, out, color.ch [0], color.ch [1], color.ch [2]);
+                else if (canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_256 || canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_240)
+                    out = channel ? chafa_term_info_emit_set_color_bg_256 (ctx->term_info, out, colors [channel])
+                                  : chafa_term_info_emit_set_color_fg_256 (ctx->term_info, out, colors [channel]);
+                else if (canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_16)
+                    out = channel ? chafa_term_info_emit_set_color_bg_16 (ctx->term_info, out, colors [channel])
+                                  : chafa_term_info_emit_set_color_fg_16 (ctx->term_info, out, colors [channel]);
+                else
+                    out = channel ? chafa_term_info_emit_set_color_bg_8 (ctx->term_info, out, colors [channel])
+                                  : chafa_term_info_emit_set_color_fg_8 (ctx->term_info, out, colors [channel] & 7);
+            }
+            *current = reset ? CHAFA_PALETTE_INDEX_TRANSPARENT : colors [channel];
+            *current_direct = color;
+            if (channel) ctx->cur_bg_default = defaults [channel];
+            else ctx->cur_fg_default = defaults [channel];
+        }
+        if ((transparent [0] && transparent [1]) || (transparent [0] && defaults [1]))
+        {
+            out = queue_char (ctx, out, ' ');
+            if (i + 1 < end && !canvas->cells [i + 1].c) out = queue_char (ctx, out, ' ');
+        }
+        else
+            out = queue_char (ctx, out, cell->c);
+    }
+    return out;
+}
+
 G_GNUC_WARN_UNUSED_RESULT static gchar *
 build_ansi_row (PrintCtx *ctx, gint row, gchar *out)
 {
@@ -682,12 +778,18 @@ build_ansi_row (PrintCtx *ctx, gint row, gchar *out)
         && canvas->config.canvas_mode != CHAFA_CANVAS_MODE_FGBG)
     {
         if (canvas->config.fg_only_enabled)
+        {
             out = reset_fg (ctx, out);
+            if (canvas->fg_color_map.entries)
+                out = chafa_term_info_emit_disable_bold (ctx->term_info, out);
+        }
         else
             out = reset_attributes (ctx, out);
     }
 
-    switch (canvas->config.canvas_mode)
+    if (canvas->fg_color_map.entries || canvas->bg_color_map.entries)
+        out = emit_ansi_mapped (ctx, out, i, i_max);
+    else switch (canvas->config.canvas_mode)
     {
         case CHAFA_CANVAS_MODE_TRUECOLOR:
             out = emit_ansi_truecolor (ctx, out, i, i_max);
@@ -722,6 +824,12 @@ build_ansi_row (PrintCtx *ctx, gint row, gchar *out)
      * is held, to preserve any BG color set previously. */
     if (canvas->config.canvas_mode != CHAFA_CANVAS_MODE_FGBG)
     {
+        if (canvas->config.fg_only_enabled && ctx->cur_bold
+            && (canvas->fg_color_map.entries || canvas->bg_color_map.entries))
+        {
+            out = chafa_term_info_emit_disable_bold (ctx->term_info, out);
+            ctx->cur_bold = FALSE;
+        }
         if (canvas->config.fg_only_enabled)
             out = reset_fg (ctx, out);
         else

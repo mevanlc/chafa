@@ -78,6 +78,34 @@ to RGB independently of the terminal's current palette. Six-digit RGB hex
 values accept an optional `#` or `0x` prefix: `--bg=112233`, `--bg='#112233'`,
 and `--bg=0x112233` all select the same RGB color.
 
+Use `--force-color-fg=COLORS` and `--force-color-bg=COLORS` to restrict the
+foreground and background palettes independently. Lists accept color names,
+RGB hex, palette indices, and inclusive index ranges, for example:
+
+```sh
+chafa --colors=256 --force-color-fg=16-231 --force-color-bg=232-255 image.png
+chafa --colors=16 --force-color-fg=1,2,3 --force-color-bg=0,4 --bg=0 image.png
+```
+
+Chafa chooses glyphs using the restricted palettes and maps colors to their
+nearest candidates. In the second example, colors matching the explicit
+`--bg=0` use the terminal's default background rather than painted black.
+An explicit `--fg` works the same way for the default foreground. Defaults
+are added only when their matching force option is present.
+
+Every requested color, including an explicit default, must exist in the
+effective color mode. Numeric indices select exact terminal slots; names and
+hex must exactly match a Kitty/xterm palette RGB in indexed modes. Thus `1`
+works in 16-color mode, while the name `red` (`#ff0000`, slot `196`) is
+available through the extended palette or truecolor. Mode `240` excludes slots `0`–`15`; `16/8`
+allows background slots `0`–`7` and foreground slots `0`–`15`.
+
+Force palettes select symbols when the output format is automatic. Explicit
+pixel formats and color modes `none`/`2` are rejected. `--fg-only` cannot be
+combined with `--force-color-bg`. Repeating a force option replaces its list;
+equal-distance matches use list order. These options do not change the
+terminal's palette or default color settings.
+
 ## Python bindings
 
 [Erica Ferrua Edwardsdóttir](https://mage.black/) maintains

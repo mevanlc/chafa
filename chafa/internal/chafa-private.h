@@ -115,6 +115,8 @@ struct ChafaCanvasConfig
     gfloat dither_intensity;
     guint32 fg_color_packed_rgb;
     guint32 bg_color_packed_rgb;
+    GArray *fg_color_palette;
+    GArray *bg_color_palette;
     gint alpha_threshold;  /* 0-255. 255 = no alpha in output */
     gfloat work_factor;
     ChafaSymbolMap symbol_map;

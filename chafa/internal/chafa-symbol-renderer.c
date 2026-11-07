@@ -69,6 +69,83 @@ transparent_cell_color (ChafaCanvasMode canvas_mode)
     }
 }
 
+static gboolean
+has_color_maps (const ChafaCanvas *canvas)
+{
+    return canvas->fg_color_map.entries || canvas->bg_color_map.entries;
+}
+
+typedef struct
+{
+    ChafaColor color;
+    guint32 encoded;
+    gboolean is_default;
+}
+MappedColor;
+
+static MappedColor
+map_color_at (ChafaCanvas *canvas, gboolean foreground, const ChafaColor *color, guint rank)
+{
+    const ChafaColorMap *map = foreground ? &canvas->fg_color_map : &canvas->bg_color_map;
+    ChafaPalette *palette = foreground ? &canvas->fg_palette : &canvas->bg_palette;
+    MappedColor result = { *color, 0, FALSE };
+
+    if (color->ch [3] < canvas->config.alpha_threshold)
+    {
+        result.encoded = transparent_cell_color (canvas->config.canvas_mode);
+    }
+    else if (map->entries)
+    {
+        guint best = chafa_color_map_find_nearest (map, color);
+        const ChafaColorPaletteEntry *entry;
+        if (rank && map->entries->len > 1)
+        {
+            guint i, second = best;
+            gint error = G_MAXINT;
+            for (i = 0; i < map->entries->len; i++)
+            {
+                gint e = chafa_color_diff_fast (color, &map->colors [i]);
+                if (i != best && e < error) { second = i; error = e; }
+            }
+            best = second;
+        }
+        entry = &g_array_index (map->entries, ChafaColorPaletteEntry, best);
+        result.color = map->colors [best];
+        result.encoded = canvas->config.canvas_mode == CHAFA_CANVAS_MODE_TRUECOLOR
+            ? entry->rgb | 0xff000000 : entry->index;
+        result.is_default = entry->output == CHAFA_COLOR_OUTPUT_DEFAULT;
+    }
+    else if (canvas->config.canvas_mode == CHAFA_CANVAS_MODE_TRUECOLOR)
+        result.encoded = chafa_pack_color (color);
+    else
+    {
+        ChafaColorCandidates candidates;
+        chafa_palette_lookup_nearest (palette, canvas->config.color_space, color, &candidates);
+        result.encoded = candidates.index [rank];
+        result.color = *chafa_palette_get_color (palette, canvas->config.color_space, result.encoded);
+    }
+    return result;
+}
+
+static void
+map_color_pair (ChafaCanvas *canvas, ChafaColorPair *pair)
+{
+    pair->colors [CHAFA_COLOR_PAIR_FG] = map_color_at (canvas, TRUE, &pair->colors [CHAFA_COLOR_PAIR_FG], 0).color;
+    if (canvas->config.fg_only_enabled)
+        pair->colors [CHAFA_COLOR_PAIR_BG] = canvas->default_colors.colors [CHAFA_COLOR_PAIR_BG];
+    else
+        pair->colors [CHAFA_COLOR_PAIR_BG] = map_color_at (canvas, FALSE, &pair->colors [CHAFA_COLOR_PAIR_BG], 0).color;
+}
+
+static void
+assign_mapped_colors (ChafaCanvasCell *cell, MappedColor fg, MappedColor bg)
+{
+    cell->fg_color = fg.encoded;
+    cell->bg_color = bg.encoded;
+    cell->fg_default = fg.is_default;
+    cell->bg_default = bg.is_default;
+}
+
 static void
 eval_symbol_colors (ChafaCanvas *canvas, ChafaWorkCell *wcell, const ChafaSymbol *sym, SymbolEval *eval)
 {
@@ -194,7 +271,7 @@ eval_symbol (ChafaCanvas *canvas, ChafaWorkCell *wcell, gint sym_index,
 
     sym = &canvas->config.symbol_map.symbols [sym_index];
 
-    if (canvas->config.fg_only_enabled)
+    if (canvas->config.fg_only_enabled && !has_color_maps (canvas))
     {
         eval.colors = canvas->default_colors;
     }
@@ -203,7 +280,14 @@ eval_symbol (ChafaCanvas *canvas, ChafaWorkCell *wcell, gint sym_index,
         eval_symbol_colors (canvas, wcell, sym, &eval);
     }
 
-    if (canvas->use_quantized_error)
+    if (has_color_maps (canvas))
+    {
+        SymbolEval snapped = eval;
+        map_color_pair (canvas, &snapped.colors);
+        eval_symbol_error (wcell, sym, &snapped, NULL, NULL, canvas->config.color_space);
+        eval.error = snapped.error;
+    }
+    else if (canvas->use_quantized_error)
     {
         eval_symbol_error (wcell, sym, &eval, &canvas->fg_palette,
                            &canvas->bg_palette, canvas->config.color_space);
@@ -230,7 +314,7 @@ eval_symbol_wide (ChafaCanvas *canvas, ChafaWorkCell *wcell_a, ChafaWorkCell *wc
 
     sym2 = &canvas->config.symbol_map.symbols2 [sym_index];
 
-    if (canvas->config.fg_only_enabled)
+    if (canvas->config.fg_only_enabled && !has_color_maps (canvas))
     {
         eval.colors = canvas->default_colors;
     }
@@ -242,7 +326,15 @@ eval_symbol_wide (ChafaCanvas *canvas, ChafaWorkCell *wcell_a, ChafaWorkCell *wc
                                  &eval);
     }
 
-    if (canvas->use_quantized_error)
+    if (has_color_maps (canvas))
+    {
+        SymbolEval2 snapped = eval;
+        map_color_pair (canvas, &snapped.colors);
+        eval_symbol_error_wide (wcell_a, wcell_b, sym2, &snapped, NULL, NULL, canvas->config.color_space);
+        eval.error [0] = snapped.error [0];
+        eval.error [1] = snapped.error [1];
+    }
+    else if (canvas->use_quantized_error)
     {
         eval_symbol_error_wide (wcell_a, wcell_b,
                                 sym2,
@@ -484,6 +576,47 @@ get_palette_color (ChafaCanvas *canvas, ChafaPalette *palette, gint index)
 }
 
 static void
+apply_fill_mapped (ChafaCanvas *canvas, const ChafaWorkCell *wcell, ChafaCanvasCell *cell)
+{
+    ChafaColor mean;
+    MappedColor fg [2], bg [2];
+    gint best_error = G_MAXINT;
+    guint f, b;
+    gint i;
+
+    chafa_work_cell_calc_mean_color (wcell, &mean);
+    for (f = 0; f < 2; f++)
+    {
+        fg [f] = map_color_at (canvas, TRUE, &mean, f);
+        bg [f] = map_color_at (canvas, FALSE, &mean, f);
+        if (canvas->config.fg_only_enabled)
+        {
+            bg [f].color = canvas->default_colors.colors [CHAFA_COLOR_PAIR_BG];
+            bg [f].encoded = transparent_cell_color (canvas->config.canvas_mode);
+            bg [f].is_default = FALSE;
+        }
+    }
+    for (f = 0; f < 2; f++)
+        for (b = 0; b < 2; b++)
+            for (i = 0; i < canvas->config.fill_symbol_map.n_symbols; i++)
+            {
+                const ChafaSymbol *sym = &canvas->config.fill_symbol_map.symbols [i];
+                ChafaColor blend;
+                gint ch, error;
+                for (ch = 0; ch < 4; ch++)
+                    blend.ch [ch] = (fg [f].color.ch [ch] * sym->popcount
+                                     + bg [b].color.ch [ch] * (64 - sym->popcount)) / 64;
+                error = chafa_color_diff_fast (&mean, &blend);
+                if (error < best_error)
+                {
+                    best_error = error;
+                    cell->c = sym->c;
+                    assign_mapped_colors (cell, fg [f], bg [b]);
+                }
+            }
+}
+
+static void
 apply_fill_fg_only (ChafaCanvas *canvas, const ChafaWorkCell *wcell, ChafaCanvasCell *cell)
 {
     ChafaColor mean;
@@ -694,7 +827,14 @@ static void
 update_cell_colors (ChafaCanvas *canvas, ChafaCanvasCell *cell_out,
                     const ChafaColorPair *color_pair)
 {
-    if (canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_256
+    cell_out->fg_default = cell_out->bg_default = FALSE;
+    if (has_color_maps (canvas))
+    {
+        MappedColor fg = map_color_at (canvas, TRUE, &color_pair->colors [CHAFA_COLOR_PAIR_FG], 0);
+        MappedColor bg = map_color_at (canvas, FALSE, &color_pair->colors [CHAFA_COLOR_PAIR_BG], 0);
+        assign_mapped_colors (cell_out, fg, bg);
+    }
+    else if (canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_256
         || canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_240
         || canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_16
         || canvas->config.canvas_mode == CHAFA_CANVAS_MODE_INDEXED_8
@@ -719,7 +859,10 @@ update_cell_colors (ChafaCanvas *canvas, ChafaCanvasCell *cell_out,
     }
 
     if (canvas->config.fg_only_enabled)
+    {
         cell_out->bg_color = transparent_cell_color (canvas->config.canvas_mode);
+        cell_out->bg_default = FALSE;
+    }
 }
 
 static gint
@@ -773,6 +916,8 @@ update_cells_wide (ChafaCanvas *canvas, ChafaWorkCell *work_cell_a, ChafaWorkCel
     update_cell_colors (canvas, cell_a_out, &color_pair);
     cell_b_out->fg_color = cell_a_out->fg_color;
     cell_b_out->bg_color = cell_a_out->bg_color;
+    cell_b_out->fg_default = cell_a_out->fg_default;
+    cell_b_out->bg_default = cell_a_out->bg_default;
 
     /* quantize_colors_for_cell_16_8() can revert the char to solid, and
      * the solid char is always narrow. Extend it to both cells. */
@@ -847,9 +992,11 @@ update_cells_row (ChafaCanvas *canvas, gint row)
 
         /* FIXME: Check popcount == 0 or == 64 instead of symbol char */
         if (cells [cx].c != 0 && (cells [cx].c == ' ' || cells [cx].c == 0x2588
-                                  || cells [cx].fg_color == cells [cx].bg_color))
+                                  || (!has_color_maps (canvas) && cells [cx].fg_color == cells [cx].bg_color)))
         {
-            if (canvas->config.fg_only_enabled)
+            if (has_color_maps (canvas))
+                apply_fill_mapped (canvas, wcell, &cells [cx]);
+            else if (canvas->config.fg_only_enabled)
             {
                 apply_fill_fg_only (canvas, wcell, &cells [cx]);
                 cells [cx].bg_color = transparent_cell_color (canvas->config.canvas_mode);
@@ -863,7 +1010,7 @@ update_cells_row (ChafaCanvas *canvas, gint row)
         /* If cell is still featureless after fill, use blank_char consistently */
 
         if (cells [cx].c != 0 && (cells [cx].c == ' '
-                                  || cells [cx].fg_color == cells [cx].bg_color))
+                                  || (!has_color_maps (canvas) && cells [cx].fg_color == cells [cx].bg_color)))
         {
             cells [cx].c = canvas->blank_char;
 
@@ -874,14 +1021,15 @@ update_cells_row (ChafaCanvas *canvas, gint row)
             if (canvas->blank_char == ' ' && cx > 0)
             {
                 cells [cx].fg_color = cells [cx - 1].fg_color;
+                cells [cx].fg_default = cells [cx - 1].fg_default;
 
                 /* We may use inverted colors when the foreground is transparent.
                  * Some downstream tools don't handle this and will keep
                  * modulating the wrong pen. In order to suppress long runs of
                  * artifacts, make the (unused) foreground pen opaque (gh#108). */
-                if (canvas->config.canvas_mode == CHAFA_CANVAS_MODE_TRUECOLOR)
+                if (canvas->config.canvas_mode == CHAFA_CANVAS_MODE_TRUECOLOR && !has_color_maps (canvas))
                     cells [cx].fg_color |= 0xff000000;
-                else if (cells [cx].fg_color == CHAFA_PALETTE_INDEX_TRANSPARENT)
+                else if (!has_color_maps (canvas) && cells [cx].fg_color == CHAFA_PALETTE_INDEX_TRANSPARENT)
                     cells [cx].fg_color = CHAFA_PALETTE_INDEX_FG;
             }
         }

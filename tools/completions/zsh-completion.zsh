@@ -20,6 +20,8 @@ local options=(
   {-d,--duration}"[The time to show each file]:SECONDS"
   --exact-size"[Try to match the input's size exactly. Defaults to auto]:MODE:(auto on off)"
   --fg"[Foreground color (name, hex, or xterm index 0-255).]:COLOR:(black blue cyan gray green magenta orange red white)"
+  --force-color-fg"[Restrict foreground palette; colors and inclusive index ranges]:COLORS"
+  --force-color-bg"[Restrict background palette; colors and inclusive index ranges]:COLORS"
   --fg-only"[Leave the background color untouched]"
   --files"[Read list of files to process from PATH (newline-separated), or '-' for stdin]:FILE:_files"
   --files0"[Read list of files to process from PATH (NUL-separated), or '-' for stdin]:FILE:_files"
